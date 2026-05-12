@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evennia-mob-spawner"
+version = "0.0.1"
+description = "Declarative YAML-driven mob spawn system for Evennia"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+authors = [{name = "Tim Baird"}]
+requires-python = ">=3.10"
+dependencies = [
+    "evennia",
+    "pyyaml",
+    "evennia-yaml-reader",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["evennia_mob_spawner*"]
