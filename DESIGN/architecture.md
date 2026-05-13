@@ -255,6 +255,5 @@ Both libraries share `evennia-yaml-reader` as a runtime dependency for fetching 
 
 - **Default value for `max_per_room`** when unspecified. Probably 1; confirm during implementation.
 - **Default tick interval value.** Today's FCM script uses 15s — reasonable starting point.
-- **Settings name prefix.** Likely `MOB_SPAWNER_*` (matching the package name in caps) — exact keys deferred until settings dispatch lands.
 - **`at_server_start` helper name.** Settle during implementation.
 - **`ms_status` output shape.** What information it displays and how it formats. Deferred — better scoped once the library has been exercised in practice.

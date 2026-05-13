@@ -2,7 +2,29 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-13 (afternoon — latest)
+## 2026-05-13 (evening — latest)
+
+**Pipeline scaffold + Finder implemented; demo gamedir running end-to-end against world-builder.**
+
+Implementation status:
+
+- **Pipeline scaffold landed** (`errors`, `definitions`, `finder`, `loader`, `validator`, `deployer`). Each stage has a class and method that returns the right empty shape — pipeline flows end-to-end with zero real logic and is ready for incremental fill-in.
+- **`ms-validate` CLI shipped** — runs Reader → Definitions → Finder → Loader → Validator (Tier 1+2). Exit 0 clean / 1 on findings. UTF-8 stdio reconfigure for Windows. Registered as `[project.scripts]` entry point.
+- **`evennia-mob-spawner-test-yaml` populated** with 4 rules (cover the indistinguishable-variant pattern, death-cooldown semantics, den targeting, post_spawn_hook, pack spawning) plus a wilderness rabbit rule. Validates clean via `ms-validate --reader local`.
+- **`evennia-mob-spawner-test-world` populated** — 6 rooms with the `mob_area` tags the spawn rules expect, 10 exits, a navigable star topology from an untagged hub.
+- **`config.py` implemented** — settings dispatch (`get_reader_class`, `get_configured_reader`) parallel to world-builder's. Settings keys: `MOB_SPAWNER_READER` / `MOB_SPAWNER_READER_KWARGS`.
+- **`__init__.py` populated for the implemented surface only** — yaml-reader passthroughs (Reader / ReaderResult / GitHubReader / LocalReader and the five typed exceptions), settings dispatch (`get_reader_class` / `get_configured_reader`), Definitions / DefinitionsError. Scaffold-stage stages and their error types deliberately not promoted until they have real behaviour.
+- **`Finder` implemented (real, not scaffold)** — ported verbatim from `evennia-world-builder`. Walks the manifest tree (`definitions.yaml` + per-folder `index.yaml`) following a scope query, returns `FoundLocation(path, kind, location)`. Scaffold's `kind="root"` divergence dropped. 9 tests ported.
+- **`ms_log` shim implemented** — routes library log lines to `mob_spawner.log` in `settings.LOG_DIR` via Evennia's `log_file()`; silent no-op outside Evennia.
+- **Demo gamedir wired up** at `examples/demo_game/`: both `evennia_world_builder` and `evennia_mob_spawner` in `INSTALLED_APPS`; `WORLDBUILDER_*` and `MOB_SPAWNER_*` `GITHUB_PAT/_REPO/_REF` constants with env-var defaults; `secret_settings.py` holds the operator's PATs.
+- **End-to-end smoke green:** `wb_build all` from inside the demo gamedir fetches `evennia-mob-spawner-test-world` via GitHubReader, validates, builds 6 rooms + 10 exits (16 objects). `mob_area` tags land correctly on every tagged room, including the double-tagged `kobold_warren` + `kobold_warren_den` on the den room.
+- **22 tests green** in the library's own `runtests.py`.
+
+One TBD resolved since the previous entry: settings-name prefix is no longer deferred — `MOB_SPAWNER_*` is now in production via the demo gamedir's settings.py and the library's config.py. Open TBDs that remain: `max_per_room` default, default tick interval, `at_server_start` helper name, `ms_status` output shape.
+
+Next stage: real Loader implementation. The flatten-vs-per-file-with-file_metadata question discussed mid-session is the first thing to settle when that work begins.
+
+## 2026-05-13 (afternoon)
 
 Eleven additional decisions landed in [architecture.md](architecture.md), bringing the count to 19:
 
