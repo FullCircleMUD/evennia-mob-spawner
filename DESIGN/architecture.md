@@ -136,9 +136,12 @@ Mirroring world-builder's command pattern: scope-aware admin commands auto-insta
 | Operation | Purpose | State preserved? |
 |---|---|---|
 | **Load** (upsert) | For each rule-set file in scope: validate → drain → swap → resume (see [Load protocol](#load-protocol)). Find or create its Script; replace `db.spawn_table` with current YAML; purge stale entries for removed rules. | Yes — `last_spawn_times`, `last_death_times`, `last_observed_counts` survive (snapshot before stop, restored after swap). |
-| **Stop** | Stop the tick on a script; keep the persistent script + state. Resumable. | Yes — state preserved. |
+| **Restart** | Drain → start the existing script's ticker without re-reading YAML. Recovery action for a script that appears stuck or stopped; works when YAML is currently unavailable (Reader fetch failed). | Yes — state preserved; rules unchanged. |
+| **Stop** | Stop the tick on a script; keep the persistent script + state. Resumable via Restart or Load. | Yes — state preserved. |
 | **Delete** | Remove the script entirely from the DB. | No — full clean slate. |
 | **Status / inspect** | Read-only view of a script's rules, cooldowns, population counts, last tick. Surfaces "this script's backing file is missing from the manifest" warnings. | n/a — read-only. |
+
+The operator escalation ladder from lightest to heaviest intervention: **Status** (diagnose) → **Restart** (kick the ticker, keep everything) → **Load** (fresh YAML + restart) → **Stop** (intentional pause) → **Delete** (clean slate).
 
 All four accept a scope query in the same form as world-builder's commands (`all`, `shard=X`, `shard=X zone=Y`, …). Scope resolution uses the same Reader / Definitions / Finder pipeline as load.
 
@@ -190,7 +193,7 @@ The library exposes a helper (name [TBD]) the consumer calls from `server/conf/a
 4. **One persistent Script per rule-set YAML file.** Multiple scripts in the running game; each owns its own subset of rules. Plays naturally with sharding (each shard loads its own files; router loads none).
 5. **Library observes deaths via tick-time count delta, not via callback.** No breadcrumbs on spawned mobs, no `on_death()` API. The library's surface to the typeclass after spawn is zero. The detection formula is `deaths = (last_observed_count + spawned_last_tick) - current_count`.
 6. **Pipeline shape mirrors world-builder up to the terminal stage.** Reader → Definitions → Finder → Loader → Validator → Upsert. The terminal stage is upsert-with-state-preservation rather than tag-sweep-and-rebuild — the load-bearing distinction from world-builder.
-7. **Same operator command pattern as world-builder.** Scope-aware admin commands (`ms_load all` / `ms_load shard=X` / etc.), auto-installed into `AccountCmdSet` via the library's AppConfig.ready(), `cmd:superuser()` locked, `ms_` prefix. Four operations: `ms_load` (upsert), `ms_stop` (graceful), `ms_delete` (clean removal), `ms_status` (read-only inspect).
+7. **Same operator command pattern as world-builder.** Scope-aware admin commands (`ms_load all` / `ms_load shard=X` / etc.), auto-installed into `AccountCmdSet` via the library's AppConfig.ready(), `cmd:superuser()` locked, `ms_` prefix. Operations: `ms_load` (upsert), `ms_restart` (kick the ticker without YAML reload), `ms_stop` (graceful), `ms_delete` (clean removal), `ms_status` (read-only inspect).
 8. **`at_server_start` is consumer-driven.** Library provides the helper; consumer's gamedir wires it into its `at_server_startstop.py`. Library does not assume anything about the consumer's lifecycle hooks.
 9. **Typeclass count matching is exact, not subclass-inclusive.** Each rule maintains a distinct population; subclasses are managed by their own rules. Enables the "indistinguishable variant" pattern (same `key`, different typeclass, different loot) where population ratios produce emergent loot variation deterministically — compliance-relevant because deterministic supply isn't gambling.
 10. **Rule identity is an author-supplied `rule_id` integer, unique within file.** Bookkeeping keyed on `rule_id` (file implicit per-script); global identity `(rule_file, rule_id)` for operator surfaces. Stable across YAML reordering / field edits; changing the ID is the explicit signal that the rule is now a different rule.
