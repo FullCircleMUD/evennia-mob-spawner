@@ -14,7 +14,7 @@ Nine additional decisions landed in [architecture.md](architecture.md), bringing
 14. **Spawn-time errors caught and logged, not raised.** `create_object` and hook invocations run inside `try / except`. One bad rule doesn't take down the script's tick.
 15. **Empty `area_tag` queries logged.** Pre-spawn check — if zero rooms match, log a warning and skip. Repeats per tick (operators may still be deploying world content).
 16. **`den_room_tag` uses the same tag category as `area_tag`.** No second category. Comments in YAML are the consumer's documentation tool if they want to distinguish "group" vs "single" intent.
-17. **Library logs to a dedicated file** — colocated with Evennia's other logs (default `server/logs/mob_spawner.log` alongside `server.log` and `portal.log`) but distinct from them. Library code uses Python's `logging` module under the `"evennia_mob_spawner"` logger name. Path configurable. Errors, warnings, and lifecycle events route here, never to `server.log`.
+17. **Library logs via Evennia's `evennia.utils.logger.log_file()`** to `mob_spawner.log` in `settings.LOG_DIR` — colocated with `server.log`/`portal.log`, distinct file, thread-safe, zero consumer plumbing. Errors, warnings, and lifecycle events route here, never to `server.log`.
 
 ## 2026-05-13 (morning)
 

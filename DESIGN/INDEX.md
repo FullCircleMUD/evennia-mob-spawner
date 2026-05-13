@@ -9,9 +9,9 @@ Map of all design documents in this directory, organised by category. Add new do
 
 ## Architecture and design
 
-- **[architecture.md](architecture.md)** — high-level mapping of the spawn system's mechanisms (targeting, room selection, population maintenance, spawn-time tags, post_spawn_hook, death notification) and the library / consumer ownership boundary for each. Captures the two architectural decisions agreed so far (area-tag category as a library-level setting; library re-tags spawned mobs with the rule's `area_tag`) plus the open questions to resolve before locking the rule schema.
+- **[architecture.md](architecture.md)** — primary entry point for architectural questions. Library / consumer ownership boundary, pipeline shape, agreed decisions, open `[TBD]` items.
 
-*(Focused docs to follow as work begins: `rule-schema.md` (the YAML rule shape and field semantics), `script-lifecycle.md` (how the persistent script comes up, ticks, persists across restarts, reloads rules without losing history), `death-protocol.md` (the exact breadcrumb attributes the library stamps and the `on_death(rule_id)` callback the consumer invokes), `cross-validator.md` (rules ↔ tagged rooms coherence check).)*
+*(Focused docs may follow as work demands them — for example, the rule schema, script lifecycle, or the cross-validator between rule files and tagged rooms. Add them here when they exist.)*
 
 ## Archive
 
