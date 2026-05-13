@@ -25,6 +25,40 @@ Reader → Definitions → Finder → Loader → Validator → Upsert
 
 The Reader / Definitions / Finder / Loader / Validator stages are conceptually identical to world-builder's. They are duplicated, not shared, until a third consumer makes extraction worthwhile.
 
+## Validation tiering and gating
+
+Same model as world-builder; predicates split by whether they need a running Evennia engine:
+
+| Tier | Checks | Needs Evennia? | Where it runs |
+|---|---|---|---|
+| 1 — Shape | Required fields, types, well-formedness, field-pair exclusivity (`respawn_seconds` xor `death_cooldown_seconds`) | No | `ms-validate` CLI, `ms_load` |
+| 2 — Per-file uniqueness | `rule_id` unique within file | No | `ms-validate` CLI, `ms_load` |
+| 3 — Engine resolvability | `typeclass` actually importable, `post_spawn_hook` dotted path resolves | Yes | `ms_load` only |
+| 4 — Cross-refs | *(omitted; mob-spawner has no cross-rule references)* | n/a | n/a |
+
+### Gating
+
+A flag in the consumer's `definitions.yaml` — same name as world-builder's — controls whether `ms_load` pre-validates the whole repo on every invocation:
+
+```yaml
+repo-ci-pre-validation: true   # default: false
+```
+
+- **`false`** (default): `ms_load` walks the whole repo and runs Tier 1+2 before any in-scope work. Safe; expensive at scale.
+- **`true`**: `ms_load` trusts the consumer's CI gate. Runs only Tier 3 on the in-scope files. Whole-repo Tier 1+2 is skipped on the assumption that CI has already enforced it on the YAML at merge time.
+
+**Per-invocation override:** `ms_load <scope> --force-validate` runs whole-repo Tier 1+2 regardless of the flag. Same semantics as `wb_build --force-validate`.
+
+### `ms-validate` CLI
+
+A standalone console-script (entry point in `pyproject.toml`) that runs Reader → Definitions → Finder → Loader → Validator at Tier 1+2 against a content repo. No Evennia bootstrap required; designed for:
+
+- **Local iteration** — author edits a rule, runs `ms-validate --reader local --root ../mob-spawner-content` to confirm the YAML is well-formed before committing.
+- **Pre-commit hook** — same invocation, called by `pre-commit` or a `husky`-style runner.
+- **CI gate** — GitHub Actions / equivalent runs the CLI against the PR branch; merge blocked on findings.
+
+Exit `0` on a clean run, `1` on any finding. Same `--reader local --root <path>` / future-GitHub variant as `wb-validate`. The CLI invariant: it never imports Evennia, so it can run in environments without an engine.
+
 ## One Script per rule-set file
 
 The unit is **one persistent Evennia Script per rule-set YAML file**. Multiple scripts in the running game; each owns its own subset of rules. The consumer's `definitions.yaml` declares what a file represents — for FCM, one file per zone. A different consumer might slice by district, by faction, by encounter type.
@@ -204,6 +238,8 @@ The library exposes a helper (name [TBD]) the consumer calls from `server/conf/a
 15. **Empty `area_tag` queries are detected and logged.** Before the room-selection step, if zero rooms match the rule's `area_tag` under the configured category, the library logs a warning (with rule context). Skip the spawn. Repeat detection per tick — operators may be in the middle of deploying world content; the rule starts working as soon as tagged rooms appear.
 16. **`den_room_tag` uses the same tag category as `area_tag`.** No second category. Consumers wanting to distinguish "group of rooms" from "single room" can comment their YAML to make the intent clear. Keep the library surface minimal.
 17. **Library logs via Evennia's `evennia.utils.logger.log_file()`** to a dedicated filename (`mob_spawner.log`) inside `settings.LOG_DIR` — colocated with `server.log` / `portal.log`, distinct file. Thread-safe out of the box; zero consumer-side plumbing beyond what Evennia already configures. No Python `logging` module wiring, no custom `FileHandler`, no settings to add. Errors (decision #14), warnings (decision #15), and lifecycle events all route here. Nothing reaches `server.log` from this library.
+18. **`ms_restart` is a first-class operator command.** Kicks the ticker on an existing script without re-reading YAML; preserves state. Recovery action for stuck / stopped scripts; works when YAML is unavailable (Reader fetch failed). Sits between `ms_status` and `ms_load` on the escalation ladder. Composition of `script.stop_when_safe()` + `script.start()` — both primitives already needed for `ms_stop` and `ms_load`.
+19. **Validation gating mirrors world-builder.** Three tiers (shape / per-file uniqueness / engine-resolvability); no Tier 4 (no cross-rule references). `repo-ci-pre-validation` flag in `definitions.yaml` (same name as world-builder) lets a consumer skip whole-repo Tier 1+2 in `ms_load` when CI has already gated the YAML. `ms_load --force-validate` overrides per-invocation. Standalone **`ms-validate`** CLI runs Tier 1+2 without Evennia for local iteration / pre-commit / CI. See [Validation tiering and gating](#validation-tiering-and-gating).
 
 ## The seam with world-builder
 

@@ -16,6 +16,9 @@ dependencies = [
     "evennia-yaml-reader",
 ]
 
+[project.scripts]
+ms-validate = "evennia_mob_spawner.cli:_validate_main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["evennia_mob_spawner*"]
