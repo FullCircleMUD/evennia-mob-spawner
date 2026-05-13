@@ -9,11 +9,30 @@ the spawn-rule pipeline as it is built out.
 from django.test import TestCase
 
 import evennia_mob_spawner
+from evennia_mob_spawner.log import ms_log
 
 
 class PackageSmokeTest(TestCase):
     def test_version_present(self):
         self.assertEqual(evennia_mob_spawner.__version__, "0.0.1")
+
+
+class LogShimSmokeTest(TestCase):
+    """ms_log is importable and callable without raising."""
+
+    def test_ms_log_callable_at_default_level(self):
+        # Must not raise even if Evennia logger isn't fully bootstrapped
+        # in this test context (the shim swallows ImportError silently).
+        ms_log("smoke test: default level")
+
+    def test_ms_log_unknown_level_coerced(self):
+        # Unknown levels degrade to INFO rather than rejecting — the shim
+        # contract is "never raise into the caller."
+        ms_log("smoke test: unknown level", level="NONSENSE")
+
+    def test_ms_log_valid_levels(self):
+        for level in ("INFO", "WARN", "ERROR"):
+            ms_log(f"smoke test: level {level}", level=level)
 
 
 class YamlReaderDependencyTest(TestCase):

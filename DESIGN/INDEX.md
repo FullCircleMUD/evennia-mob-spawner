@@ -10,6 +10,7 @@ Map of all design documents in this directory, organised by category. Add new do
 ## Architecture and design
 
 - **[architecture.md](architecture.md)** — primary entry point for architectural questions. Library / consumer ownership boundary, pipeline shape, agreed decisions, open `[TBD]` items.
+- **[logging.md](logging.md)** — dedicated `mob_spawner.log` co-located with Evennia logs via `evennia.utils.logger.log_file()`. `ms_log` shim with ISO-timestamp + level format; silent no-op outside Evennia.
 
 *(Focused docs may follow as work demands them — for example, the rule schema, script lifecycle, or the cross-validator between rule files and tagged rooms. Add them here when they exist.)*
 
