@@ -30,6 +30,7 @@ pip install git+https://github.com/FullCircleMUD/evennia-mob-spawner.git@main
 
 - **[CLAUDE.md](CLAUDE.md)** — load-bearing principles and orientation for working in the repository.
 - **[DESIGN/INDEX.md](DESIGN/INDEX.md)** — index of design documents.
+- **[DESIGN/architecture.md](DESIGN/architecture.md)** — the spawn system's mechanisms and the library / consumer ownership boundary; the first architectural pass.
 
 ## License
 

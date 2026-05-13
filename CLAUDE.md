@@ -23,8 +23,9 @@ For any non-trivial task, start by reading in this order:
 
 1. [README.md](README.md) — what the project is, status, quick start.
 2. [DESIGN/INDEX.md](DESIGN/INDEX.md) — map of all design docs.
-3. [DESIGN/documentation-structure.md](DESIGN/documentation-structure.md) — what goes in CLAUDE.md vs README.md vs DESIGN/, and naming conventions.
-4. [../LIBRARY_STANDARDS.md](../LIBRARY_STANDARDS.md) — cross-library conventions for everything under `FCM/libraries/`.
+3. [DESIGN/architecture.md](DESIGN/architecture.md) — high-level mapping of the spawn system's mechanisms and the library / consumer ownership boundary. Read this before adding to the library's surface area; it captures decisions already pinned and flags the open questions explicitly.
+4. [DESIGN/documentation-structure.md](DESIGN/documentation-structure.md) — what goes in CLAUDE.md vs README.md vs DESIGN/, and naming conventions.
+5. [../LIBRARY_STANDARDS.md](../LIBRARY_STANDARDS.md) — cross-library conventions for everything under `FCM/libraries/`.
 
 ## Load-bearing architectural principles
 
