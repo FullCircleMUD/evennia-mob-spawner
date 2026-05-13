@@ -6,10 +6,63 @@ the evennia-yaml-reader dependency is wired up. Real tests land alongside
 the spawn-rule pipeline as it is built out.
 """
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
+
+from evennia_yaml_reader import ReaderNotFoundError, ReaderResult
 
 import evennia_mob_spawner
+from evennia_mob_spawner.config import get_reader_class
+from evennia_mob_spawner.definitions import Definitions
+from evennia_mob_spawner.errors import (
+    DefinitionsError,
+    FinderManifestError,
+    FinderQueryError,
+)
+from evennia_mob_spawner.finder import Finder, FoundLocation
 from evennia_mob_spawner.log import ms_log
+
+
+class FakeReader:
+    """Used by GetReaderClassTest to verify dispatch via @override_settings.
+
+    Defined at module scope so it is importable as
+    ``evennia_mob_spawner.tests.FakeReader``.
+    """
+
+
+class FixtureReader:
+    """An in-memory Reader for tests of Finder (and later Loader).
+
+    Maps path → parsed-data; raises ReaderNotFoundError for unknown paths.
+    """
+
+    def __init__(self, files: dict):
+        self.files = files
+
+    def read(self, path: str) -> ReaderResult:
+        if path not in self.files:
+            raise ReaderNotFoundError(f"FixtureReader: path {path!r} not in fixtures")
+        data = self.files[path]
+        return ReaderResult(raw_bytes=repr(data).encode(), parsed=data)
+
+
+# Synthetic manifest used by FinderTest. Mirrors the layout in
+# evennia-mob-spawner-test-yaml so unit-test behaviour matches the
+# live fixture repo.
+SCAFFOLD = {
+    "definitions.yaml": {"levels": ["shard", "zone"]},
+    "index.yaml": {"entries": [
+        {"name": "shard0", "kind": "folder"},
+        {"name": "shard1", "kind": "file"},
+    ]},
+    "shard0/index.yaml": {"entries": [
+        {"name": "millholm", "kind": "file"},
+        {"name": "wilderness", "kind": "file"},
+    ]},
+    "shard1.yaml": {"rules": []},
+    "shard0/millholm.yaml": {"rules": []},
+    "shard0/wilderness.yaml": {"rules": []},
+}
 
 
 class PackageSmokeTest(TestCase):
@@ -45,28 +98,19 @@ class PipelineScaffoldSmokeTest(TestCase):
     """
 
     def test_pipeline_flows_end_to_end(self):
-        from evennia_mob_spawner.definitions import Definitions
         from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.finder import Finder, FoundLocation
         from evennia_mob_spawner.loader import Loader, LoadResult
         from evennia_mob_spawner.validator import Validator
 
-        class _NullReader:
-            """Minimal Reader stand-in for scaffold-stage tests."""
-
-            def read(self, path):  # pragma: no cover
-                raise NotImplementedError(
-                    "scaffold tests must not require Reader I/O"
-                )
-
-        reader = _NullReader()
-        definitions = Definitions.from_dict({"levels": ["shard", "zone"]})
+        reader = FixtureReader(SCAFFOLD)
+        definitions = Definitions.from_reader(reader)
         finder = Finder(reader, definitions)
         loader = Loader(reader, definitions)
         validator = Validator(definitions)
         deployer = Deployer(definitions)
 
-        found = finder.find({"shard": "shard0"})
+        # Empty query → root location (Finder doesn't need to read any index)
+        found = finder.find()
         self.assertIsInstance(found, FoundLocation)
 
         load_result = loader.load(found)
@@ -91,6 +135,87 @@ class PipelineScaffoldSmokeTest(TestCase):
         d = Definitions.from_dict(None)
         self.assertEqual(d.levels, ())
         self.assertFalse(d.repo_ci_pre_validation)
+
+
+class GetReaderClassTest(TestCase):
+    """Verify settings-based dispatch via MOB_SPAWNER_READER."""
+
+    def test_default_returns_github_reader(self):
+        from evennia_yaml_reader import GitHubReader
+
+        self.assertIs(get_reader_class(), GitHubReader)
+
+    @override_settings(MOB_SPAWNER_READER="evennia_mob_spawner.tests.FakeReader")
+    def test_override_via_settings(self):
+        self.assertIs(get_reader_class(), FakeReader)
+
+    @override_settings(MOB_SPAWNER_READER="evennia_mob_spawner.does_not_exist.Nope")
+    def test_bad_dotted_path_raises(self):
+        with self.assertRaises((ImportError, AttributeError)):
+            get_reader_class()
+
+
+class FinderTest(TestCase):
+    """Verify Finder.find() against a synthetic manifest tree."""
+
+    def _make_finder(self):
+        reader = FixtureReader(SCAFFOLD)
+        defs = Definitions.from_reader(reader)
+        return Finder(reader, defs)
+
+    def test_empty_query_returns_root(self):
+        found = self._make_finder().find()
+        self.assertEqual(found.path, "")
+        self.assertEqual(found.kind, "folder")
+        self.assertEqual(found.location, {})
+
+    def test_shard_folder_query_returns_folder_location(self):
+        found = self._make_finder().find({"shard": "shard0"})
+        self.assertEqual(found.path, "shard0")
+        self.assertEqual(found.kind, "folder")
+        self.assertEqual(found.location, {"shard": "shard0"})
+
+    def test_shard_file_query_returns_file_location(self):
+        found = self._make_finder().find({"shard": "shard1"})
+        self.assertEqual(found.path, "shard1.yaml")
+        self.assertEqual(found.kind, "file")
+        self.assertEqual(found.location, {"shard": "shard1"})
+
+    def test_full_path_query(self):
+        found = self._make_finder().find({"shard": "shard0", "zone": "millholm"})
+        self.assertEqual(found.path, "shard0/millholm.yaml")
+        self.assertEqual(found.kind, "file")
+        self.assertEqual(found.location, {"shard": "shard0", "zone": "millholm"})
+
+    def test_invalid_key_raises(self):
+        # Keys-not-in-levels is DefinitionsError (Definitions owns the
+        # query-shape validation; Finder only validates manifest content).
+        with self.assertRaises(DefinitionsError):
+            self._make_finder().find({"area": "town"})
+
+    def test_skipped_level_raises(self):
+        # levels=[shard, zone]; can't query just {zone: X}
+        with self.assertRaises(DefinitionsError):
+            self._make_finder().find({"zone": "millholm"})
+
+    def test_value_not_in_index_raises(self):
+        with self.assertRaises(FinderQueryError):
+            self._make_finder().find({"shard": "nonexistent"})
+
+    def test_zone_not_in_shard_raises(self):
+        with self.assertRaises(FinderQueryError):
+            self._make_finder().find({"shard": "shard0", "zone": "nonexistent"})
+
+    def test_missing_index_raises_manifest_error(self):
+        scaffold = {
+            "definitions.yaml": {"levels": ["shard"]},
+            # no index.yaml at root
+        }
+        reader = FixtureReader(scaffold)
+        defs = Definitions.from_reader(reader)
+        finder = Finder(reader, defs)
+        with self.assertRaises(FinderManifestError):
+            finder.find({"shard": "x"})
 
 
 class CliScaffoldSmokeTest(TestCase):

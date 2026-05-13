@@ -15,6 +15,14 @@ class FinderError(Exception):
     """Base class for Finder failures."""
 
 
+class FinderManifestError(FinderError):
+    """An index.yaml is malformed or missing where the Finder expected it."""
+
+
+class FinderQueryError(FinderError):
+    """Operator query is invalid: value not found at level in the manifest."""
+
+
 class LoaderError(Exception):
     """Base class for Loader failures."""
 

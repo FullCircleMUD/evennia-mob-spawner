@@ -22,10 +22,13 @@ SERVERNAME = "mob_spawner_demo"
 
 
 ######################################################################
-# evennia-world-builder — INSTALLED_APPS registration so the library's
-# AppConfig.ready() fires and auto-installs wb_build into AccountCmdSet.
+# Library INSTALLED_APPS registration — each library's AppConfig.ready()
+# fires and auto-installs its admin commands into AccountCmdSet.
 ######################################################################
-INSTALLED_APPS = list(INSTALLED_APPS) + ["evennia_world_builder"]  # noqa: F405
+INSTALLED_APPS = list(INSTALLED_APPS) + [  # noqa: F405
+    "evennia_world_builder",
+    "evennia_mob_spawner",
+]
 
 
 ######################################################################
@@ -46,6 +49,24 @@ WORLDBUILDER_GITHUB_REF = os.environ.get(
 
 
 ######################################################################
+# mob-spawner content source — the rule-set fixture repo
+######################################################################
+# Pre-wired now even though the library's settings dispatch hasn't
+# landed yet (architecture doc has it as [TBD]); these settings are
+# inert until ms_load is implemented and starts reading them. Same
+# pattern as the world-builder block above.
+MOB_SPAWNER_GITHUB_PAT = os.environ.get("MOB_SPAWNER_GITHUB_PAT", "")
+MOB_SPAWNER_GITHUB_REPO = os.environ.get(
+    "MOB_SPAWNER_GITHUB_REPO",
+    "FullCircleMUD/evennia-mob-spawner-test-yaml",
+)
+MOB_SPAWNER_GITHUB_REF = os.environ.get(
+    "MOB_SPAWNER_GITHUB_REF",
+    "main",
+)
+
+
+######################################################################
 # Settings given in secret_settings.py override those in this file.
 ######################################################################
 try:
@@ -55,14 +76,18 @@ except ImportError:
 
 
 ######################################################################
-# Reader kwargs for the world-builder library.
+# Reader kwargs — built AFTER secret_settings import so PAT/repo/ref
+# overrides there are reflected. Both libraries default to GitHubReader,
+# so (repo, ref, pat) is the right kwargs shape for each.
 ######################################################################
-# Built AFTER secret_settings import so any PAT/repo/ref overrides there
-# are reflected. world-builder's default Reader is GitHubReader, so
-# these three keys (repo, ref, pat) are what get_configured_reader()
-# expects.
 WORLDBUILDER_READER_KWARGS = {
     "repo": WORLDBUILDER_GITHUB_REPO,
     "ref": WORLDBUILDER_GITHUB_REF,
     "pat": WORLDBUILDER_GITHUB_PAT,
+}
+
+MOB_SPAWNER_READER_KWARGS = {
+    "repo": MOB_SPAWNER_GITHUB_REPO,
+    "ref": MOB_SPAWNER_GITHUB_REF,
+    "pat": MOB_SPAWNER_GITHUB_PAT,
 }
