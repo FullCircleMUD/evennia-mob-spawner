@@ -30,6 +30,24 @@ def get_reader_class():
     return getattr(module, attr_name)
 
 
+DEFAULT_AREA_TAG_CATEGORY = "mob_area"
+
+
+def get_area_tag_category() -> str:
+    """Return the tag category used for ``area_tag`` / ``den_room_tag`` queries.
+
+    Architecture decision #1: tag category is a library-level setting,
+    not a per-rule field. Override via ``settings.MOB_SPAWNER_AREA_TAG_CATEGORY``
+    if your game uses a different category name; default is ``"mob_area"``,
+    matching FCM's existing convention.
+
+    Used by the Validator's Tier 4 diagnostic predicates (decision #24)
+    and by the Deployer's room-selection / re-tag machinery once it
+    lands.
+    """
+    return getattr(settings, "MOB_SPAWNER_AREA_TAG_CATEGORY", DEFAULT_AREA_TAG_CATEGORY)
+
+
 def get_configured_reader():
     """Resolve the reader class and instantiate it with MOB_SPAWNER_READER_KWARGS.
 

@@ -40,4 +40,12 @@ class Kobold(DefaultObject):
 
 class KoboldChieftain(DefaultObject):
     """Test boss-style mob — single instance, den-room placement,
-    death-cooldown semantics, post_spawn_hook for state reset."""
+    death-cooldown semantics. Per-spawn state reset via
+    ``ms_at_post_spawn`` (architecture decision #23): the library
+    invokes this method after the mob is fully constructed and
+    rule-level ``attrs`` overrides have been applied.
+    """
+
+    def ms_at_post_spawn(self):
+        """Reset per-instance state that should not carry across spawns."""
+        self.db.has_rallied = False

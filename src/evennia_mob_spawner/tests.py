@@ -494,10 +494,55 @@ _VALID_RULE = {
     "max_per_room": 2,
     "desc": "hello",
     "attrs": {"hp": 10},
-    "post_spawn_hook": "hooks.do_thing",
     "spawn_with_typeclass": "test.Boss",
     "den_room_tag": "lair",
 }
+
+
+# Test fixtures for Tier 3 — resolvable importable classes / non-class objects
+# that the predicates can use without depending on Evennia internals.
+
+class _FakeTypeclass:
+    """Tier 3 fixture — a class without ms_at_post_spawn."""
+
+
+class _FakeTypeclassWithHook:
+    """Tier 3 fixture — a class with a callable ms_at_post_spawn method."""
+
+    def ms_at_post_spawn(self):
+        pass
+
+
+class _FakeTypeclassWithBadHook:
+    """Tier 3 fixture — a class whose ms_at_post_spawn is NOT callable."""
+
+    ms_at_post_spawn = "not a method"
+
+
+class _FakeTypeclassWithBadHookSignature:
+    """Tier 3 fixture — hook is callable but signature requires extra args."""
+
+    def ms_at_post_spawn(self, extra_arg):
+        pass
+
+
+class _FakeTypeclassWithDefaultedHookSignature:
+    """Tier 3 fixture — hook has extra params but all have defaults."""
+
+    def ms_at_post_spawn(self, optional=None):
+        pass
+
+
+class _FakeTypeclassWithVariadicHook:
+    """Tier 3 fixture — hook is variadic, callable as zero-arg."""
+
+    def ms_at_post_spawn(self, *args, **kwargs):
+        pass
+
+
+def _fake_function():
+    """Module-level function — resolves but is not a class."""
+    pass
 
 
 class FieldPredicatesHappyPathTest(TestCase):
@@ -808,8 +853,7 @@ class OptionalStringPredicatesTest(TestCase):
 
     def _rule(self, **fields):
         base = {k: v for k, v in _VALID_RULE.items()
-                if k not in ("desc", "post_spawn_hook",
-                             "spawn_with_typeclass", "den_room_tag")}
+                if k not in ("desc", "spawn_with_typeclass", "den_room_tag")}
         base.update(fields)
         return base
 
@@ -829,26 +873,6 @@ class OptionalStringPredicatesTest(TestCase):
         from evennia_mob_spawner.validator import _check_desc_well_formed
         finding = _check_desc_well_formed(LoadedRule("p", self._rule(desc=42)))
         self.assertIn("'desc' must be a string", finding)
-
-    # post_spawn_hook — empty REJECTED.
-
-    def test_post_spawn_hook_absent_passes(self):
-        from evennia_mob_spawner.validator import _check_post_spawn_hook_well_formed
-        self.assertIsNone(_check_post_spawn_hook_well_formed(LoadedRule("p", self._rule())))
-
-    def test_post_spawn_hook_wrong_type(self):
-        from evennia_mob_spawner.validator import _check_post_spawn_hook_well_formed
-        finding = _check_post_spawn_hook_well_formed(
-            LoadedRule("p", self._rule(post_spawn_hook=42)),
-        )
-        self.assertIn("'post_spawn_hook' must be a string", finding)
-
-    def test_post_spawn_hook_empty_rejected(self):
-        from evennia_mob_spawner.validator import _check_post_spawn_hook_well_formed
-        finding = _check_post_spawn_hook_well_formed(
-            LoadedRule("p", self._rule(post_spawn_hook="")),
-        )
-        self.assertIn("must be a non-empty string", finding)
 
     # spawn_with_typeclass
 
@@ -1064,6 +1088,350 @@ class FileMetadataShapeTest(TestCase):
             ))
         # Each malformed entry surfaces its own finding.
         self.assertEqual(len(v.errors), 2)
+
+
+_FAKE_TC = "evennia_mob_spawner.tests._FakeTypeclass"
+_FAKE_TC_HOOK = "evennia_mob_spawner.tests._FakeTypeclassWithHook"
+_FAKE_TC_BAD_HOOK = "evennia_mob_spawner.tests._FakeTypeclassWithBadHook"
+_FAKE_FUNC = "evennia_mob_spawner.tests._fake_function"
+
+
+class Tier3ResolvabilityTest(TestCase):
+    """Tier 3 — engine-runtime predicates for dotted-path resolution.
+
+    Tier 3 fires only with ``evennia_runtime=True`` (ms_load); ms-validate
+    (CLI) leaves it off. Three predicates:
+    - `typeclass` resolves to a class
+    - `spawn_with_typeclass` (when present) resolves to a class
+    - the resolved `typeclass`'s optional `ms_at_post_spawn` is callable
+    """
+
+    def _make_validator(self):
+        return Validator(
+            Definitions.from_dict({"levels": []}),
+            evennia_runtime=True,
+        )
+
+    def _rule(self, **overrides):
+        # Strip the dotted-path fields from _VALID_RULE; each test fills
+        # in what it wants.
+        base = {k: v for k, v in _VALID_RULE.items()
+                if k not in ("typeclass", "spawn_with_typeclass")}
+        base.update(overrides)
+        return base
+
+    # typeclass --------------------------------------------------------
+
+    def test_resolvable_typeclass_passes(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=_FAKE_TC),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_typeclass_module_not_importable_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass="does.not.exist.AnyClass"),
+            ]}))
+        self.assertIn("could not be imported", v.errors[0])
+
+    def test_typeclass_module_loads_but_class_missing(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass="evennia_mob_spawner.tests.NonExistent"),
+            ]}))
+        self.assertIn("not found", v.errors[0])
+
+    def test_typeclass_not_a_dotted_path_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass="Foo"),
+            ]}))
+        self.assertIn("not a dotted path", v.errors[0])
+
+    def test_typeclass_resolves_but_is_not_a_class_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass=_FAKE_FUNC),  # function, not class
+            ]}))
+        self.assertIn("is not a class", v.errors[0])
+
+    # spawn_with_typeclass ---------------------------------------------
+
+    def test_spawn_with_typeclass_resolvable_passes(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=_FAKE_TC, spawn_with_typeclass=_FAKE_TC),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_spawn_with_typeclass_absent_passes(self):
+        # Absent is fine — optional field.
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=_FAKE_TC),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_spawn_with_typeclass_module_not_importable_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(
+                    typeclass=_FAKE_TC,
+                    spawn_with_typeclass="missing.module.Class",
+                ),
+            ]}))
+        self.assertIn("'spawn_with_typeclass'", v.errors[0])
+
+    def test_spawn_with_typeclass_resolves_but_not_a_class_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(
+                    typeclass=_FAKE_TC,
+                    spawn_with_typeclass=_FAKE_FUNC,
+                ),
+            ]}))
+        self.assertIn("'spawn_with_typeclass'", v.errors[0])
+        self.assertIn("is not a class", v.errors[0])
+
+    # ms_at_post_spawn -------------------------------------------------
+
+    def test_typeclass_with_callable_ms_at_post_spawn_passes(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=_FAKE_TC_HOOK),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_typeclass_without_ms_at_post_spawn_passes(self):
+        # Method is optional — its absence is silent, not a finding.
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=_FAKE_TC),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_typeclass_with_non_callable_ms_at_post_spawn_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass=_FAKE_TC_BAD_HOOK),
+            ]}))
+        self.assertIn("ms_at_post_spawn", v.errors[0])
+        self.assertIn("not callable", v.errors[0])
+
+    # ms_at_post_spawn signature --------------------------------------
+
+    def test_ms_at_post_spawn_canonical_signature_passes(self):
+        # def ms_at_post_spawn(self): ...
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=_FAKE_TC_HOOK),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_ms_at_post_spawn_extra_required_arg_flagged(self):
+        # def ms_at_post_spawn(self, extra_arg): ...
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        bad_path = "evennia_mob_spawner.tests._FakeTypeclassWithBadHookSignature"
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass=bad_path),
+            ]}))
+        self.assertIn("requires additional arguments", v.errors[0])
+        self.assertIn("extra_arg", v.errors[0])
+
+    def test_ms_at_post_spawn_defaulted_args_pass(self):
+        # def ms_at_post_spawn(self, optional=None): ...
+        v = self._make_validator()
+        good_path = "evennia_mob_spawner.tests._FakeTypeclassWithDefaultedHookSignature"
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=good_path),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_ms_at_post_spawn_variadic_signature_passes(self):
+        # def ms_at_post_spawn(self, *args, **kwargs): ...
+        v = self._make_validator()
+        good_path = "evennia_mob_spawner.tests._FakeTypeclassWithVariadicHook"
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass=good_path),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    # Tier 3 gating ----------------------------------------------------
+
+    def test_tier_3_not_run_when_evennia_runtime_false(self):
+        # Bad typeclass path passes silently if engine flag is off.
+        v = Validator(
+            Definitions.from_dict({"levels": []}),
+            evennia_runtime=False,
+        )
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(typeclass="does.not.exist.AnyClass"),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+
+class Tier4DiagnosticTest(TestCase):
+    """Tier 4 — deploy-time diagnostic warnings (decision #24).
+
+    Diagnostics never refuse, only log. Same gating as Tier 3
+    (``evennia_runtime=True``), runs after the predicate-driven loop,
+    only on rules that survived Tier 1. The DB query is mocked because
+    the test database is isolated from the diagnostic's tag table; the
+    happy path stubs ``count() = N``, the warning path stubs ``count() = 0``.
+    """
+
+    def _make_validator(self):
+        return Validator(
+            Definitions.from_dict({"levels": []}),
+            evennia_runtime=True,
+        )
+
+    def _resolvable_rule(self, **overrides):
+        # Use a real importable class so Tier 3 passes; the diagnostic
+        # is what we're isolating.
+        base = {k: v for k, v in _VALID_RULE.items()
+                if k not in ("typeclass", "spawn_with_typeclass")}
+        base["typeclass"] = _FAKE_TC
+        base.update(overrides)
+        return base
+
+    def _validate_with_db_count(self, validator, load_result, *, count):
+        """Run validate with ObjectDB.objects.filter().count() stubbed.
+
+        Returns a list of (message, level) tuples captured from
+        ``ms_log`` calls.
+        """
+        from unittest.mock import patch, MagicMock
+
+        captured = []
+
+        def fake_log(message, level="INFO"):
+            captured.append((message, level))
+
+        fake_qs = MagicMock()
+        fake_qs.count.return_value = count
+
+        with patch(
+            "evennia.objects.models.ObjectDB.objects",
+            new=MagicMock(filter=MagicMock(return_value=fake_qs)),
+        ), patch("evennia_mob_spawner.validator.ms_log", new=fake_log):
+            validator.validate(load_result)
+
+        return captured
+
+    # area_tag ---------------------------------------------------------
+
+    def test_area_tag_with_rooms_no_warning(self):
+        v = self._make_validator()
+        logs = self._validate_with_db_count(
+            v,
+            LoadResult(rule_sets={"a.yaml": [self._resolvable_rule()]}),
+            count=3,
+        )
+        area_warnings = [m for m, lvl in logs
+                         if lvl == "WARN" and "area_tag" in m]
+        self.assertEqual(area_warnings, [])
+
+    def test_area_tag_with_zero_rooms_logs_warning(self):
+        v = self._make_validator()
+        logs = self._validate_with_db_count(
+            v,
+            LoadResult(rule_sets={"a.yaml": [self._resolvable_rule()]}),
+            count=0,
+        )
+        area_warnings = [m for m, lvl in logs
+                         if lvl == "WARN" and "area_tag" in m]
+        self.assertEqual(len(area_warnings), 1)
+        self.assertIn("0 tagged rooms", area_warnings[0])
+
+    # den_room_tag -----------------------------------------------------
+
+    def test_den_room_tag_absent_no_warning(self):
+        # _VALID_RULE has den_room_tag — strip it for this test.
+        v = self._make_validator()
+        rule = self._resolvable_rule()
+        rule.pop("den_room_tag", None)
+        logs = self._validate_with_db_count(
+            v, LoadResult(rule_sets={"a.yaml": [rule]}), count=0,
+        )
+        den_warnings = [m for m, lvl in logs
+                        if lvl == "WARN" and "den_room_tag" in m]
+        self.assertEqual(den_warnings, [])
+
+    def test_den_room_tag_with_zero_rooms_logs_warning(self):
+        v = self._make_validator()
+        logs = self._validate_with_db_count(
+            v,
+            LoadResult(rule_sets={"a.yaml": [self._resolvable_rule()]}),
+            count=0,
+        )
+        den_warnings = [m for m, lvl in logs
+                        if lvl == "WARN" and "den_room_tag" in m]
+        self.assertEqual(len(den_warnings), 1)
+
+    # Gating: Tier 4 stays off without evennia_runtime ----------------
+
+    def test_tier_4_not_run_when_evennia_runtime_false(self):
+        # The CLI path. Tier 4 should not fire at all — no DB query,
+        # no log line. Importing evennia.objects.models inside the
+        # diagnostic shouldn't even be attempted.
+        v = Validator(
+            Definitions.from_dict({"levels": []}),
+            evennia_runtime=False,
+        )
+        from unittest.mock import patch
+
+        captured = []
+
+        def fake_log(message, level="INFO"):
+            captured.append((message, level))
+
+        with patch("evennia_mob_spawner.validator.ms_log", new=fake_log):
+            v.validate(LoadResult(rule_sets={"a.yaml": [self._resolvable_rule()]}))
+
+        self.assertEqual(captured, [])
+
+    # Gating: Tier 4 skipped on rules that failed Tier 1 --------------
+
+    def test_tier_4_skipped_when_rule_failed_tier_1(self):
+        # Rule missing typeclass — Tier 1 flags it, Tier 4 must not run
+        # (no point diagnosing a rule that won't deploy).
+        v = self._make_validator()
+        rule = self._resolvable_rule()
+        rule.pop("typeclass")
+        from evennia_mob_spawner.errors import ValidatorError
+        from unittest.mock import patch
+
+        captured = []
+
+        def fake_log(message, level="INFO"):
+            captured.append((message, level))
+
+        with patch("evennia_mob_spawner.validator.ms_log", new=fake_log):
+            with self.assertRaises(ValidatorError):
+                v.validate(LoadResult(rule_sets={"a.yaml": [rule]}))
+
+        # No WARN about area_tag — diagnostic was skipped.
+        warnings = [m for m, lvl in captured if lvl == "WARN"]
+        self.assertEqual(warnings, [])
 
 
 class CliScaffoldSmokeTest(TestCase):

@@ -2,7 +2,88 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-14 (night — latest)
+## 2026-05-14 (very late — latest)
+
+**Tier 3 signature check added; Tier 4 (deploy-time diagnostics) introduced. Validation surface now covers everything from "is the shape right" through "will the rule actually behave at deploy."**
+
+Two additions on top of the previous Tier 3 pass:
+
+- **Tier 3 signature check.** `_check_typeclass_ms_at_post_spawn_signature` added to `EVENNIA_ONLY_PREDICATES`. Uses `inspect.signature` to verify that — if the typeclass declares `ms_at_post_spawn` — the method is callable as `mob.ms_at_post_spawn()` (zero required args after `self`). Catches `def ms_at_post_spawn(self, extra_arg):` typos at validation time instead of at the first spawn's TypeError. Accepts canonical zero-arg shape, defaulted args, variadic `*args/**kwargs`, staticmethod / classmethod variants. Defers cleanly when `inspect.signature` can't introspect (rare C-extension callables).
+- **Tier 4 introduced — deploy-time diagnostics.** A new tier with a distinct contract from predicates:
+  - Functions have signature `(LoadedRule) -> None` (no return value to inspect).
+  - Side effects allowed (typically `ms_log` calls).
+  - Never refuse deployment.
+  - Naming convention `_diagnostic_*` (vs predicates' `_check_*`) marks the difference at every call site.
+  - Listed in a separate class-level tuple `EVENNIA_DIAGNOSTICS` on the Validator.
+  - Runs only with `evennia_runtime=True`, only on rules that survived Tier 1 (so we don't diagnose rules that won't deploy).
+
+Two Tier 4 diagnostics shipped:
+
+- **`_diagnostic_area_tag_rooms_exist`** — queries `ObjectDB` for rooms tagged with the rule's `area_tag` under the configured category. If count is zero, emits a WARN log line. Operator sees one warning per deploy ("rule_id N's area_tag=X has 0 tagged rooms — spawns will be skipped until rooms are tagged") instead of 240+/hour from tick-time skip logging (decision #15).
+- **`_diagnostic_den_room_tag_rooms_exist`** — parallel, for the optional `den_room_tag` field. Spawns fall through to area-random when the den is missing, so the message mentions the fallthrough behaviour.
+
+Config helper added: **`get_area_tag_category()`** in `config.py`, defaulting to `"mob_area"`. Override via `settings.MOB_SPAWNER_AREA_TAG_CATEGORY`. Pins decision #1's "library-level setting" into actual settings dispatch.
+
+Wiring: Tier 4 runs in the same per-rule loop as Tier 2, after the duplicate-rule_id check. It runs even when Tier 2 records a duplicate (the diagnostic still helps the operator). It's skipped when Tier 1 failed (no point diagnosing a broken rule).
+
+**Predicate purity preserved.** The earlier proposal to put tag-existence checks inside predicates (with side effects + always returning None) was rejected during discussion — predicates stay pure, the diagnostic tier is a separate mechanism with its own contract. Worth the small extra tuple/method to keep the predicate convention clean.
+
+Tests:
+
+- **4 new Tier 3 signature tests** in `Tier3ResolvabilityTest`: canonical signature passes, extra-required-arg flagged, defaulted-args pass, variadic passes.
+- **6 new Tier 4 diagnostic tests** in `Tier4DiagnosticTest`: area_tag with rooms (no warn), area_tag with zero rooms (warn), den_room_tag absent (no warn), den_room_tag with zero rooms (warn), Tier 4 gated off without evennia_runtime, Tier 4 skipped when rule failed Tier 1. Tests mock `ObjectDB.objects.filter().count()` via `unittest.mock.patch` and capture `ms_log` calls.
+- 3 new fake-typeclass fixtures at module scope (`_FakeTypeclassWithBadHookSignature`, `_FakeTypeclassWithDefaultedHookSignature`, `_FakeTypeclassWithVariadicHook`).
+
+One decision added to [architecture.md](architecture.md), bringing the count to 24:
+
+24. **Tag-existence is a Tier 4 deploy-time diagnostic, not a validation refusal.** Separate `EVENNIA_DIAGNOSTICS` tuple, separate `_diagnostic_*` convention. Operator may be deploying world content in parallel; one deploy-time WARN per missing-tag rule, no spam at tick time.
+
+Decision #19 reworded to note that the "no Tier 4" claim was true *for predicates* but Tier 4 *diagnostics* were added later under decision #24. Validation tiering table now has 4 rows + a "Refuses?" column distinguishing predicate tiers from the diagnostic tier.
+
+**131 tests green** (up from 121: +10 new tests across the two additions).
+**`ms-validate`** against the test-yaml fixture: clean, 0 findings (Tier 4 doesn't fire in the CLI path).
+
+Next stage: **Deployer / upsert** terminal stage (decision #6). Per-rule-set-file persistent Script lookup-or-create, replace `db.spawn_table`, preserve `last_spawn_times` / `last_death_times` / observation history. Then the **`ms_load` admin command** wiring everything together (gating helper, validator with `evennia_runtime=True`, deployer, async race protocol per decision #13).
+
+## 2026-05-14 (late night)
+
+**Tier 3 (engine-runtime) predicates landed. `post_spawn_hook` YAML field dropped; replaced by `ms_at_post_spawn` method-on-typeclass protocol (decision #23).**
+
+The dotted-path `post_spawn_hook` field in the rule schema has been replaced with a typeclass-method protocol. The library invokes `mob.ms_at_post_spawn()` if the spawned typeclass defines that method; absent, nothing happens. Duck-typed, opt-in, one method name. The `ms_` prefix marks library provenance; `at_` follows Evennia's `at_object_creation`/`at_post_move`/etc. convention.
+
+Reasoning: the consumer's existing dotted-path field came from a system written without loose-coupling concerns. Scattered hook functions across shared modules become hard to track as authoring scales, and "per-rule customization of a shared typeclass" is more cleanly expressed by subclassing the typeclass than by indirecting through a string. The empirical case the user surfaced — `CombatMob` used by 5 rules with `set_ai_idle` AND 3 rules without — is the OO case for typeclass proliferation, not the case for a per-rule hook indirection. Migration cost on the consumer side is real but bounded; the library's job is to fix the coupling the original organic design didn't worry about.
+
+Implementation:
+
+- **`_check_post_spawn_hook_well_formed` removed** from Tier 1 and from `PER_RULE_PREDICATES`. Predicate function deleted.
+- **Field removed from rule schema** in [architecture.md](architecture.md). Three optional fields remain (`desc`, `attrs`, `spawn_with_typeclass`, `den_room_tag` — wait, four).
+- **Mechanisms section** rewritten: `post_spawn_hook` subsection replaced with `ms_at_post_spawn` description (duck-typed, opt-in, no inheritance demand).
+- **`_resolve_dotted(path)` helper added** at module scope in `validator.py`. Returns `(resolved, None)` or `(None, reason)`. Used by all three Tier 3 predicates; mirrors world-builder's `_resolve_typeclass` pattern.
+- **Three Tier 3 predicates added** to `EVENNIA_ONLY_PREDICATES`:
+  - `_check_typeclass_resolvable` — resolves and is a class
+  - `_check_spawn_with_typeclass_resolvable` — when present, resolves and is a class
+  - `_check_typeclass_ms_at_post_spawn_callable` — if the resolved typeclass declares `ms_at_post_spawn`, it must be callable (catches `ms_at_post_spawn = "string"` typos at validation time, not runtime)
+- **13 new Tier 3 tests** across `Tier3ResolvabilityTest`. Covers happy paths (resolvable class, callable hook), failure modes (module not importable, class missing, not a dotted path, not a class, hook not callable), spawn_with_typeclass parity cases, and the gating test (Tier 3 inactive when `evennia_runtime=False`). Test fixtures use synthetic classes defined at module scope in `tests.py` (`_FakeTypeclass`, `_FakeTypeclassWithHook`, `_FakeTypeclassWithBadHook`, `_fake_function`).
+- **3 dropped tests** — the post_spawn_hook string-shape predicate tests from `OptionalStringPredicatesTest`.
+- **`_VALID_RULE` cleaned** — `post_spawn_hook` removed.
+- One new decision added to [architecture.md](architecture.md), bringing the count to 23:
+
+  23. **Per-spawn behaviour is a typeclass method, not a YAML field.** Library invokes `mob.ms_at_post_spawn()` if present; absent is silent. Replaces the consumer's `post_spawn_hook: <dotted_path>` pattern. A measured exception to decision #3 (locality of post-spawn behaviour outweighs the tiny protocol surface).
+
+Consumer migration:
+
+- **`evennia-mob-spawner-test-yaml/shard0/millholm.yaml`** — `post_spawn_hook:` line removed from the chieftain rule.
+- **`examples/demo_game/typeclasses/test_mobs.py`** — `KoboldChieftain` grew a `ms_at_post_spawn()` method that performs the reset previously done by the standalone hook function.
+- **`examples/demo_game/typeclasses/test_hooks.py`** — deleted; its only content (the chieftain reset function) is now on the typeclass.
+
+- **121 tests green** (up from 111). Net change: +13 Tier 3 tests, –3 dropped post_spawn_hook string tests.
+- **`ms-validate`** against the test-yaml fixture: clean, 0 findings.
+
+**Non-runtime AND runtime validation surfaces are now both complete.** Tier 1 (15 stateless per-rule predicates, after dropping post_spawn_hook), Tier 2 (rule_id uniqueness), Tier 3 (3 engine-runtime predicates), file-level shape check. The Validator's predicate set is comprehensive against the v0 rule schema.
+
+Next stage: the **Deployer / upsert** terminal stage. This is the load-bearing distinction from world-builder (decision #6): per-rule-set-file persistent Script lookup-or-create, replace `db.spawn_table`, preserve `last_spawn_times` / `last_death_times` / observation history. Then the **`ms_load` admin command** that wires everything together.
+
+## 2026-05-14 (night)
 
 **Tier 2 `rule_id` uniqueness landed; file-level shape pass body landed. Non-runtime validation surface is complete.**
 

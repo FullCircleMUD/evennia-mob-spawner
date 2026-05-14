@@ -13,9 +13,13 @@ Mirrors evennia-world-builder's predicate-tiered structure:
   module paths to be importable. Run only when the caller passes
   ``evennia_runtime=True``. ``ms_load`` passes True; ``ms-validate``
   (CLI) leaves it False.
-
-There is no Tier 4: mob-spawner has no cross-rule references
-(architecture.md decision #19).
+- **Tier 4 — diagnostic checks** (``EVENNIA_DIAGNOSTICS``):
+  ``(LoadedRule) -> None`` functions with side effects (typically
+  ``ms_log`` calls). Distinct contract from predicates: they NEVER
+  refuse deployment, they only emit deploy-time warnings. Runs only
+  with ``evennia_runtime=True``, only on rules that passed Tier 1.
+  Naming convention ``_diagnostic_*`` (vs. predicates' ``_check_*``)
+  marks the difference at every call site. See decision #24.
 
 Plus a **file-level shape pass** (``_check_file_metadata_shape``) that
 runs once per file, agnostic of the per-rule loop.
@@ -33,11 +37,17 @@ the per-rule loop.
 Predicate tuples are deliberately empty at this stage — structure
 lands first; concrete predicates land in subsequent passes.
 """
+import importlib
+import inspect
 from dataclasses import dataclass
 
 from .definitions import Definitions
 from .errors import ValidatorError
 from .loader import LoadResult
+from .log import ms_log
+
+
+_MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
 
 
 @dataclass(frozen=True)
@@ -379,27 +389,6 @@ def _check_attrs_well_formed(loaded: LoadedRule) -> str | None:
     return None
 
 
-def _check_post_spawn_hook_well_formed(loaded: LoadedRule) -> str | None:
-    """Optional shape: ``post_spawn_hook`` is a non-empty string.
-
-    Dotted path to a callable invoked with the new mob after creation.
-    Resolvability is Tier 3.
-    """
-    rule = _rule_or_none(loaded)
-    if rule is None or "post_spawn_hook" not in rule:
-        return None
-
-    value = rule["post_spawn_hook"]
-    if not isinstance(value, str):
-        return (
-            f"{loaded.path}: 'post_spawn_hook' must be a string, "
-            f"got {type(value).__name__}"
-        )
-    if not value.strip():
-        return f"{loaded.path}: 'post_spawn_hook' must be a non-empty string"
-    return None
-
-
 def _check_spawn_with_typeclass_well_formed(loaded: LoadedRule) -> str | None:
     """Optional shape: ``spawn_with_typeclass`` is a non-empty string.
 
@@ -444,6 +433,264 @@ def _check_den_room_tag_well_formed(loaded: LoadedRule) -> str | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Tier 3 — engine-runtime predicates.
+#
+# These only run when the caller passes ``evennia_runtime=True`` to the
+# Validator. ``ms_load`` does; ``ms-validate`` (CLI) doesn't, because the
+# consumer's gamedir isn't on sys.path in CI environments.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_dotted(path: str):
+    """Resolve a dotted path to an object.
+
+    Returns ``(resolved_object, None)`` on success, or
+    ``(None, predicate_ready_reason)`` on failure — the reason is a
+    short string suitable for embedding in a per-field finding (caller
+    prefixes the rule path and field name).
+    """
+    module_path, _, attr_name = path.rpartition(".")
+    if not module_path or not attr_name:
+        return None, f"{path!r} is not a dotted path"
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as e:
+        return None, f"module {module_path!r} could not be imported ({e})"
+    if not hasattr(module, attr_name):
+        return None, (
+            f"module {module_path!r} loaded but {attr_name!r} not found"
+        )
+    return getattr(module, attr_name), None
+
+
+def _check_typeclass_resolvable(loaded: LoadedRule) -> str | None:
+    """Tier 3: ``typeclass`` resolves to a class.
+
+    Defers cleanly if the field is absent or non-string (Tier 1 owns
+    those findings; Tier 3 just adds the resolvability layer).
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "typeclass" not in rule:
+        return None
+    value = rule["typeclass"]
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    resolved, error = _resolve_dotted(value)
+    if error is not None:
+        return f"{loaded.path}: 'typeclass' — {error}"
+    if not isinstance(resolved, type):
+        return (
+            f"{loaded.path}: 'typeclass' {value!r} resolved but is not a "
+            f"class (got {type(resolved).__name__})"
+        )
+    return None
+
+
+def _check_spawn_with_typeclass_resolvable(loaded: LoadedRule) -> str | None:
+    """Tier 3: ``spawn_with_typeclass`` (when present) resolves to a class."""
+    rule = _rule_or_none(loaded)
+    if rule is None or "spawn_with_typeclass" not in rule:
+        return None
+    value = rule["spawn_with_typeclass"]
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    resolved, error = _resolve_dotted(value)
+    if error is not None:
+        return f"{loaded.path}: 'spawn_with_typeclass' — {error}"
+    if not isinstance(resolved, type):
+        return (
+            f"{loaded.path}: 'spawn_with_typeclass' {value!r} resolved but is "
+            f"not a class (got {type(resolved).__name__})"
+        )
+    return None
+
+
+def _check_typeclass_ms_at_post_spawn_callable(loaded: LoadedRule) -> str | None:
+    """Tier 3: if the resolved ``typeclass`` declares ``ms_at_post_spawn``, it is callable.
+
+    The library's contract for per-spawn behaviour (architecture
+    decision #23) is an optional method on the typeclass. If the
+    typeclass declares the attribute with a non-callable value (e.g.
+    `ms_at_post_spawn = "string"` by mistake), the runtime call would
+    crash; flag it at validation.
+
+    Defers cleanly if `typeclass` is absent / non-string / unresolvable
+    (sibling predicates own those findings). Only adds a finding when
+    the resolved class actually declares the attribute and it's not
+    callable.
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "typeclass" not in rule:
+        return None
+    value = rule["typeclass"]
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    resolved, error = _resolve_dotted(value)
+    if error is not None or not isinstance(resolved, type):
+        return None
+
+    if not hasattr(resolved, _MS_AT_POST_SPAWN_ATTR):
+        return None
+    hook = getattr(resolved, _MS_AT_POST_SPAWN_ATTR)
+    if not callable(hook):
+        return (
+            f"{loaded.path}: typeclass {value!r} declares "
+            f"{_MS_AT_POST_SPAWN_ATTR!r} but it is not callable "
+            f"(got {type(hook).__name__})"
+        )
+    return None
+
+
+def _check_typeclass_ms_at_post_spawn_signature(loaded: LoadedRule) -> str | None:
+    """Tier 3: ``ms_at_post_spawn`` is callable as ``mob.ms_at_post_spawn()``.
+
+    The library invokes the method with no arguments after binding
+    ``self``. A signature like ``def ms_at_post_spawn(self, foo)`` would
+    crash with ``TypeError`` at the first spawn — catch at validation.
+
+    Accepts the canonical ``def ms_at_post_spawn(self)``, plus
+    defaulted args (``self, foo=None``), variadic ``(*args, **kwargs)``,
+    staticmethod / classmethod variants — anything callable as zero-arg
+    after the implicit ``self`` (if any) is bound.
+
+    Defers cleanly when sibling predicates would already report the
+    issue (typeclass missing / unresolvable, hook absent / non-callable).
+    Also defers cleanly when ``inspect.signature`` cannot introspect the
+    callable (rare — some C-extension callables); runtime will surface
+    those.
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "typeclass" not in rule:
+        return None
+    value = rule["typeclass"]
+    if not isinstance(value, str) or not value.strip():
+        return None
+
+    resolved, error = _resolve_dotted(value)
+    if error is not None or not isinstance(resolved, type):
+        return None
+
+    if not hasattr(resolved, _MS_AT_POST_SPAWN_ATTR):
+        return None
+    hook = getattr(resolved, _MS_AT_POST_SPAWN_ATTR)
+    if not callable(hook):
+        return None  # sibling predicate (`_callable`) owns this finding
+
+    try:
+        sig = inspect.signature(hook)
+    except (ValueError, TypeError):
+        return None  # introspection unavailable; defer to runtime
+
+    params = list(sig.parameters.values())
+    # Convention: strip first param if named self/cls (instance / classmethod).
+    # staticmethod / classmethod-bound-via-descriptor have no self/cls in the
+    # signature already; this heuristic only removes it when present.
+    if params and params[0].name in ("self", "cls"):
+        params = params[1:]
+
+    required = [
+        p for p in params
+        if p.default is inspect.Parameter.empty
+        and p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    ]
+    if required:
+        names = ", ".join(p.name for p in required)
+        return (
+            f"{loaded.path}: typeclass {value!r}'s "
+            f"{_MS_AT_POST_SPAWN_ATTR!r} requires additional arguments "
+            f"({names}) — signature must be callable as "
+            f"'mob.{_MS_AT_POST_SPAWN_ATTR}()'"
+        )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Tier 4 — diagnostic checks (engine-runtime only).
+#
+# DIFFERENT CONTRACT FROM PREDICATES. Diagnostic functions:
+#   - Return None unconditionally.
+#   - May have side effects (log via ms_log).
+#   - Never refuse deployment.
+#
+# Naming convention `_diagnostic_*` (vs predicates' `_check_*`) makes the
+# distinction visible at every call site. Tier 4 runs after Tier 1+2 pass
+# on a rule, only when `evennia_runtime=True`. See decision #24.
+# ---------------------------------------------------------------------------
+
+
+def _diagnostic_area_tag_rooms_exist(loaded: LoadedRule) -> None:
+    """Tier 4 diagnostic: WARN-log if ``area_tag`` references zero tagged rooms.
+
+    Operator may be deploying world content in parallel; this isn't a
+    validation failure. The log line surfaces the issue once per deploy
+    so the tick-time skip log (decision #15) doesn't spam.
+
+    Side effect: emits ms_log at WARN level. Returns None.
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "area_tag" not in rule:
+        return
+    value = rule["area_tag"]
+    if not isinstance(value, str) or not value.strip():
+        return
+
+    from evennia.objects.models import ObjectDB
+    from .config import get_area_tag_category
+
+    count = ObjectDB.objects.filter(
+        db_tags__db_key=value,
+        db_tags__db_category=get_area_tag_category(),
+    ).count()
+
+    if count == 0:
+        ms_log(
+            f"{loaded.path}: rule_id={rule.get('rule_id')} "
+            f"area_tag={value!r} has 0 tagged rooms — spawns will be "
+            f"skipped until rooms are tagged",
+            level="WARN",
+        )
+
+
+def _diagnostic_den_room_tag_rooms_exist(loaded: LoadedRule) -> None:
+    """Tier 4 diagnostic: WARN-log if ``den_room_tag`` references zero tagged rooms.
+
+    Same one-log-per-deploy semantic as the area_tag diagnostic.
+    Field is optional — if absent, no diagnostic.
+
+    Side effect: emits ms_log at WARN level. Returns None.
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "den_room_tag" not in rule:
+        return
+    value = rule["den_room_tag"]
+    if not isinstance(value, str) or not value.strip():
+        return
+
+    from evennia.objects.models import ObjectDB
+    from .config import get_area_tag_category
+
+    count = ObjectDB.objects.filter(
+        db_tags__db_key=value,
+        db_tags__db_category=get_area_tag_category(),
+    ).count()
+
+    if count == 0:
+        ms_log(
+            f"{loaded.path}: rule_id={rule.get('rule_id')} "
+            f"den_room_tag={value!r} has 0 tagged rooms — pack/random "
+            f"fallback will be used instead of the den",
+            level="WARN",
+        )
+
+
 class Validator:
     """Validates a LoadResult via a predicate-list pipeline.
 
@@ -480,7 +727,6 @@ class Validator:
         _check_max_per_room_well_formed,
         _check_desc_well_formed,
         _check_attrs_well_formed,
-        _check_post_spawn_hook_well_formed,
         _check_spawn_with_typeclass_well_formed,
         _check_den_room_tag_well_formed,
     )
@@ -488,7 +734,21 @@ class Validator:
     # Tier 3 — same shape as Tier 1, but only active when
     # ``evennia_runtime=True``. Predicates here must be free to import
     # consumer modules; the assumption is the engine is up.
-    EVENNIA_ONLY_PREDICATES: tuple = ()
+    EVENNIA_ONLY_PREDICATES: tuple = (
+        _check_typeclass_resolvable,
+        _check_spawn_with_typeclass_resolvable,
+        _check_typeclass_ms_at_post_spawn_callable,
+        _check_typeclass_ms_at_post_spawn_signature,
+    )
+
+    # Tier 4 — diagnostic checks. DIFFERENT CONTRACT from predicates:
+    # signature ``(LoadedRule) -> None``, side effects allowed (ms_log),
+    # no refusal. Active only with ``evennia_runtime=True``. Run after
+    # Tier 1+2 pass on a rule (decision #24).
+    EVENNIA_DIAGNOSTICS: tuple = (
+        _diagnostic_area_tag_rooms_exist,
+        _diagnostic_den_room_tag_rooms_exist,
+    )
 
     def __init__(self, definitions: Definitions, *, evennia_runtime: bool = False):
         self.definitions = definitions
@@ -514,8 +774,14 @@ class Validator:
                 if not stateless_clean:
                     # Skip Tier 2 — it would record garbage in seen_ids
                     # (e.g. a non-integer rule_id, a None, etc.).
+                    # Skip Tier 4 — diagnosing a broken rule is noise.
                     continue
                 self._check_and_record_unique_rule_id(loaded)
+                # Tier 4 diagnostics. Engine-only; side-effecting; no findings.
+                # Runs even if Tier 2 added a duplicate-id finding — the
+                # diagnostic still helps the operator.
+                if self.evennia_runtime:
+                    self._run_diagnostics_for_rule(loaded)
 
         self._check_file_metadata_shape(load_result.file_metadata)
 
@@ -593,3 +859,14 @@ class Validator:
                     f"{path}: file metadata must be a mapping, "
                     f"got {type(meta).__name__}"
                 )
+
+    def _run_diagnostics_for_rule(self, loaded: LoadedRule) -> None:
+        """Run every Tier 4 diagnostic against the rule. No return value.
+
+        Diagnostics have side effects (ms_log) and never refuse —
+        they're informational deploy-time warnings, distinct from
+        predicate findings. Caller is responsible for gating on
+        ``evennia_runtime``.
+        """
+        for diagnostic in self.EVENNIA_DIAGNOSTICS:
+            diagnostic(loaded)
