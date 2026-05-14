@@ -2,7 +2,51 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-15 (mid-morning — latest)
+## 2026-05-15 (mid-day — latest)
+
+**Pass B landed — the tick loop is real. `MobSpawnerScript.at_repeat` implements the full observe / detect-deaths / cooldown-gate / population-gate / room-pick / spawn / save-state sequence per architecture.md "The tick loop". Library now actually spawns mobs.**
+
+Implementation:
+
+- **[script.py](../src/evennia_mob_spawner/script.py)** — `at_repeat` body replaced from no-op stub with the seven-step tick loop. Per-rule logic factored into `_tick_one_rule(rule, now, ...)` so error catching can wrap one rule at a time (decision #14: one bad rule never takes down the tick). State dicts (`last_spawn_times`, `last_death_times`, `last_observed_counts`, `spawned_last_tick`) are read once at tick start, mutated through the loop, and written back at the end — no per-rule round-trips through Evennia's Attribute machinery during iteration.
+- **Helper methods on `MobSpawnerScript`:**
+  - `_count_living(rule)` — `ObjectDB.objects.filter(typeclass + area_tag)` with `db_location__isnull=False` exclusion. Exact typeclass match per decision #9 (enables indistinguishable-variant pattern).
+  - `_cooldown_elapsed(rule, rule_id, now, last_spawn_times, last_death_times)` — branches on which cooldown field the rule declares (validator enforces exactly-one). `respawn_seconds` reads `last_spawn_times`; `death_cooldown_seconds` reads `last_death_times`. Separate dicts (clean separation; consumer used a single re-stamped dict — the library departure noted in architecture.md).
+  - `_pick_room(rule)` — three-tier fallback per decision #22: pack (`spawn_with_typeclass`) → den (`den_room_tag`) → random within `area_tag` pool. All respect `max_per_room`. Room-vs-non-room disambiguation uses `db_location__isnull=True` (Evennia convention: rooms are top of the location hierarchy) rather than the consumer's FCM-specific `db_typeclass_path__contains="rooms."` heuristic.
+  - `_room_has_space(room, rule)` — counts existing same-typeclass mobs in the room with the area_tag and compares against `max_per_room`.
+  - `_spawn_one(rule, room)` — `create_object` → re-tag with `area_tag` (decision #2) → apply `desc` override → apply `attrs` via `setattr` (works with `AttributeProperty` descriptors on modern Evennia typeclasses) → invoke `mob.ms_at_post_spawn()` if present (decision #23, errors caught and logged).
+
+**Library departures from FCM's existing `zone_spawn_script.py`** (all pinned in architecture decisions; mostly decoupling cleanups):
+
+- Death detection: observation-based (count delta), not callback-based.
+- Cooldown timestamps: two separate dicts (`last_spawn_times` and `last_death_times`), not one cleverly re-stamped.
+- `rule_id`: author-supplied integer, not derived from `f"{typeclass}:{area_tag}"`.
+- Per-spawn customization: `mob.ms_at_post_spawn()` method, not a YAML dotted-path field.
+- Default cooldown: no magic 60s fallback (validator enforces exactly-one cooldown is declared).
+- Loot tags (`spawn_resources`/`spawn_gold`/etc.): not in the library — consumer concern via `attrs:` or `ms_at_post_spawn`.
+- `spawn_zone` per-script tag for population disambiguation: not used — library relies on `area_tag` being globally unique across the manifest (consumer's existing convention).
+- `mob.start_ai()`: not called by library — consumer concern.
+
+**14 new TickLoopTest cases** exercise the tick logic end-to-end against real Evennia DB objects:
+
+- Empty `spawn_table` is a no-op.
+- Below target → spawns; at target → skips.
+- Cooldown gates immediate respawn.
+- `death_cooldown_seconds` uses death time, not spawn time (death detected, then respawn fires).
+- No room with `area_tag` → silent skip with WARN log.
+- `max_per_room` respected.
+- `den_room_tag` selects the den room when present.
+- `attrs`, `desc`, `area_tag` all applied to the spawned mob.
+- State dicts (`last_observed_counts`, `spawned_last_tick`, `last_spawn_times`) updated correctly.
+- Bad rule (unresolvable typeclass) doesn't crash the tick; co-deployed good rule still spawns.
+
+**153 tests green** (was 139, +14). Tests run against real Evennia DB objects (DefaultObject, DefaultRoom via `create_object`); the test runner's `evennia._init()` setup makes this work without a gamedir.
+
+Next stage: **Pass C — race primitives.** Add `stop_when_safe(timeout)` + `force_stop()` on `MobSpawnerScript` so the Deployer can drain in-flight ticks safely during `ms_load` (decision #13). At the moment the Deployer uses `pause()`/`unpause()` which doesn't drain an in-flight tick — fine while the tick is fast, but the race-safe protocol is what decision #13 specifies.
+
+After Pass C: TBD `at_server_start` helper name (architecture.md last remaining open question).
+
+## 2026-05-15 (mid-morning)
 
 **Full admin command surface shipped: `ms_load` + `ms_stop` + `ms_restart` + `ms_delete` + `ms_status` (architecture decision #7's complete set). Pipeline runs end-to-end in vivo.**
 

@@ -6,6 +6,8 @@ the evennia-yaml-reader dependency is wired up. Real tests land alongside
 the spawn-rule pipeline as it is built out.
 """
 
+import time
+
 from django.test import TestCase, override_settings
 
 from evennia_yaml_reader import ReaderNotFoundError, ReaderResult
@@ -1580,6 +1582,251 @@ class DeployerTest(TestCase):
 
         from evennia_mob_spawner.script import MobSpawnerScript
         self.assertEqual(MobSpawnerScript.objects.count(), 0)
+
+
+class _TickLoopFixture:
+    """Helper for TickLoopTest — sets up rooms, deploys a rule, returns script.
+
+    Kept as a plain helper class rather than a TestCase mixin so the
+    test methods can construct exactly the fixture they need with
+    different rules / room layouts.
+    """
+
+    @staticmethod
+    def make_room(key, *, area_tag="test_area", extra_tag=None):
+        from evennia import DefaultRoom
+        from evennia.utils.create import create_object
+        room = create_object(DefaultRoom, key=key)
+        room.tags.add(area_tag, category="mob_area")
+        if extra_tag:
+            room.tags.add(extra_tag, category="mob_area")
+        return room
+
+    @staticmethod
+    def deploy_rule(rule, path="test.yaml"):
+        from evennia_mob_spawner.deployer import Deployer
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={path: [rule]}))
+        from evennia_mob_spawner.script import MobSpawnerScript
+        return MobSpawnerScript.objects.filter(db_key=path).first()
+
+    @staticmethod
+    def count_mobs(typeclass, area_tag="test_area"):
+        from evennia.objects.models import ObjectDB
+        return ObjectDB.objects.filter(
+            db_typeclass_path=typeclass,
+            db_tags__db_key=area_tag,
+            db_tags__db_category="mob_area",
+        ).count()
+
+
+class TickLoopTest(TestCase):
+    """Tick-loop behaviour: observe / cooldown / spawn / death detection.
+
+    Each test calls ``script.at_repeat()`` directly rather than
+    waiting for Evennia's timer — gives deterministic control over
+    when ticks fire.
+    """
+
+    def tearDown(self):
+        # Clean up scripts created during the test. Django's TestCase
+        # rolls back the DB so rooms/mobs don't need explicit cleanup.
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def _basic_rule(self, **overrides):
+        rule = {
+            "rule_id": 1,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,  # spawn immediately on first tick
+        }
+        rule.update(overrides)
+        return rule
+
+    def test_empty_spawn_table_does_nothing(self):
+        # Script with no rules at all — tick is a no-op, no mobs spawn.
+        from evennia_mob_spawner.script import MobSpawnerScript
+        from evennia.utils.create import create_script
+        script = create_script(
+            typeclass=MobSpawnerScript,
+            key="empty.yaml",
+            persistent=True,
+        )
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
+
+    def test_tick_spawns_when_below_target(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    def test_tick_skips_when_at_target(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        _TickLoopFixture.make_room("Test Room 2")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=2, max_per_room=1),
+        )
+        # First tick spawns mob 1.
+        script.at_repeat()
+        # Second tick spawns mob 2 (cooldown=0).
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2)
+        # Third tick should NOT spawn — already at target.
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2)
+
+    def test_cooldown_blocks_immediate_respawn(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=2, max_per_room=2, respawn_seconds=3600),
+        )
+        # First tick spawns mob 1.
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+        # Second tick should NOT spawn — cooldown hasn't elapsed.
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    def test_death_cooldown_uses_death_time_not_spawn_time(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=1, death_cooldown_seconds=0)
+        )
+        # Strip respawn_seconds (the _basic_rule default).
+        rule = script.db.spawn_table[0]
+        rule.pop("respawn_seconds", None)
+        script.db.spawn_table = [rule]
+
+        # First tick spawns. Population = 1, target = 1.
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+        # Same tick again, no death yet — at target, no spawn.
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+        # Simulate a death by deleting the mob.
+        from evennia.objects.models import ObjectDB
+        mob = ObjectDB.objects.filter(
+            db_typeclass_path=self.DEFAULT_OBJECT,
+        ).first()
+        mob.delete()
+        # Next tick should detect the death AND respawn (cooldown=0).
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+        # last_death_times should have been stamped for the rule.
+        self.assertIn(1, script.db.last_death_times)
+
+    def test_no_room_with_area_tag_skips_silently(self):
+        # No rooms with the area_tag exist — the rule can't find a room.
+        # Should not spawn, should not raise; tick-time WARN logged.
+        script = _TickLoopFixture.deploy_rule(self._basic_rule())
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
+
+    def test_max_per_room_respected(self):
+        # max_per_room=1, target=3, but only one room — should spawn
+        # exactly one mob and skip subsequent attempts.
+        _TickLoopFixture.make_room("Only Room")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=3, max_per_room=1),
+        )
+        script.at_repeat()
+        script.at_repeat()
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    def test_den_room_tag_used_when_present(self):
+        # Two rooms; one tagged as the den. Mob should spawn in the den.
+        ordinary = _TickLoopFixture.make_room("Ordinary Room")
+        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=1, den_room_tag="test_den"),
+        )
+        script.at_repeat()
+        from evennia.objects.models import ObjectDB
+        mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
+        self.assertEqual(mob.location, den)
+        self.assertNotEqual(mob.location, ordinary)
+
+    def test_attrs_applied_to_spawned_mob(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(attrs={"hp": 42, "is_alpha": True}),
+        )
+        script.at_repeat()
+        from evennia.objects.models import ObjectDB
+        mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
+        # `setattr(mob, ...)` was applied; the attribute should be readable.
+        self.assertEqual(getattr(mob, "hp", None), 42)
+        self.assertEqual(getattr(mob, "is_alpha", None), True)
+
+    def test_desc_override_applied(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(desc="A fearsome test mob."),
+        )
+        script.at_repeat()
+        from evennia.objects.models import ObjectDB
+        mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
+        self.assertEqual(mob.db.desc, "A fearsome test mob.")
+
+    def test_area_tag_stamped_on_spawned_mob(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(self._basic_rule())
+        script.at_repeat()
+        from evennia.objects.models import ObjectDB
+        mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
+        self.assertTrue(mob.tags.get("test_area", category="mob_area"))
+
+    def test_observed_counts_updated_after_tick(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
+        script.at_repeat()
+        # last_observed_counts should reflect post-spawn population.
+        self.assertEqual(script.db.last_observed_counts.get(1), 1)
+        self.assertEqual(script.db.spawned_last_tick.get(1), 1)
+
+    def test_last_spawn_time_set_after_spawn(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(self._basic_rule())
+        before = time.time()
+        script.at_repeat()
+        after = time.time()
+        ts = script.db.last_spawn_times.get(1)
+        self.assertIsNotNone(ts)
+        self.assertGreaterEqual(ts, before)
+        self.assertLessEqual(ts, after)
+
+    def test_bad_rule_does_not_break_tick(self):
+        # Decision #14: one bad rule doesn't take down the whole tick.
+        # Rule 2 has an unresolvable typeclass; Rule 1 is fine.
+        _TickLoopFixture.make_room("Test Room 1")
+        good = self._basic_rule(rule_id=1, target=1, max_per_room=1)
+        bad = {
+            "rule_id": 2,
+            "typeclass": "does.not.exist.AnyClass",
+            "key": "a broken mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        from evennia_mob_spawner.deployer import Deployer
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={"mixed.yaml": [good, bad]}))
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="mixed.yaml").first()
+        # Tick should NOT raise even though rule 2's typeclass is bogus.
+        script.at_repeat()
+        # The good rule did spawn its mob.
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
 
 
 class CliScaffoldSmokeTest(TestCase):
