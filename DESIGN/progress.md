@@ -2,7 +2,50 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-14 (very late — latest)
+## 2026-05-15 — latest
+
+**Deployer Pass A landed: `MobSpawnerScript` typeclass + upsert protocol. Lifecycle plumbing without tick logic.**
+
+Implementation:
+
+- **[script.py](../src/evennia_mob_spawner/script.py) (new)** — `MobSpawnerScript` typeclass. Inherits dynamically from `settings.BASE_SCRIPT_TYPECLASS` via `class_from_module` (falls back to `evennia.DefaultScript`) per decision #25. `at_script_creation` initialises the bookkeeping dicts (`db.spawn_table`, `db.last_spawn_times`, `db.last_death_times`, `db.last_observed_counts`, `db.spawned_last_tick`) and sets `interval = get_tick_seconds()` + `persistent = True` + `start_delay = True`. `at_repeat` is a no-op stub at this stage — the spawn tick loop lands in Pass B. Always calls `super()` on hooks to compose with consumer-side customisations on their base script.
+- **[deployer.py](../src/evennia_mob_spawner/deployer.py)** — scaffold replaced with real `Deployer.deploy(load_result)` implementing the upsert protocol per decision #6:
+  1. Iterate `rule_sets.items()` per file.
+  2. Find existing `MobSpawnerScript` by `db_key = path`, or create via `evennia.create_script`.
+  3. Snapshot all four bookkeeping dicts.
+  4. `script.pause()` (simple pause for now; the race-safe `stop_when_safe` / `force_stop` protocol from decision #13 lands in Pass C with `ms_load`, after the tick loop is implemented).
+  5. Replace `db.spawn_table` with the new rule list.
+  6. For each bookkeeping dict: keep entries whose `rule_id` survives the swap; purge entries whose `rule_id` vanished from YAML.
+  7. `script.unpause()` if it was active.
+  8. Log a summary line per file (`deployed <path>: N rule(s) (M preserved, K purged)`).
+- **[config.py](../src/evennia_mob_spawner/config.py)** — new `get_tick_seconds()` helper, parallel to the existing `get_area_tag_category()`. Default `15s`, overridable via `MOB_SPAWNER_TICK_SECONDS`. Resolves the open architecture.md TBD ("Default tick interval value").
+- **8 new tests** in `DeployerTest`:
+  - Creates a new script when none exists
+  - Separate files → separate scripts (same `rule_id` across files is fine)
+  - Re-deploy reuses the existing script
+  - Swap replaces `spawn_table`
+  - State preserved for surviving rules (multi-rule case)
+  - State purged for removed rules
+  - Brand-new rule starts with no bookkeeping
+  - Empty `LoadResult` creates no scripts
+
+Tests use real Evennia `create_script` + DB queries against the test database — `runtests.py` calls `evennia._init()` which sets up the typeclass registry; `test_settings.py` puts `evennia/game_template/` on `sys.path` so `BASE_SCRIPT_TYPECLASS` resolves.
+
+One decision added to [architecture.md](architecture.md), bringing the count to 25:
+
+25. **`MobSpawnerScript` inherits from `settings.BASE_SCRIPT_TYPECLASS`** (not `evennia.DefaultScript` directly). Same pattern as `evennia-shards`. Consumer customisations on their base script compose into the library's scripts automatically; consumer never has to choose between library benefits and their own additions. Implicit contract: their base must behave like a `DefaultScript` subclass.
+
+One open question resolved: default tick interval pinned at **15 seconds** (matches FCM's existing convention), overridable via `MOB_SPAWNER_TICK_SECONDS`. Architecture.md "Open questions" updated to drop the resolved TBD.
+
+**139 tests green** (up from 131).
+
+**Pass A is lifecycle plumbing only.** The script's `at_repeat` is a no-op stub; the script doesn't actually spawn anything yet. What works end-to-end now: validate → upsert into persistent scripts that survive server restarts, with cooldown/observation state preserved across YAML edits.
+
+Next stages, in order:
+1. **Pass B — the tick loop.** Fill in `MobSpawnerScript.at_repeat` with the observe / detect-deaths / cooldown-check / population-check / room-pick / spawn sequence per architecture.md "The tick loop". This is where `attrs` are applied, the rule's `area_tag` is re-stamped, and `mob.ms_at_post_spawn()` is invoked if present. Plus implement `stop_when_safe` / `force_stop` primitives for race-safe drain.
+2. **Pass C — `ms_load` admin command.** Wires gating helper + validator (`evennia_runtime=True`) + deployer with the async race protocol (decision #13). The `at_server_start` consumer-driven hook (currently TBD on name) also lands here.
+
+## 2026-05-14 (very late)
 
 **Tier 3 signature check added; Tier 4 (deploy-time diagnostics) introduced. Validation surface now covers everything from "is the shape right" through "will the rule actually behave at deploy."**
 

@@ -1434,6 +1434,154 @@ class Tier4DiagnosticTest(TestCase):
         self.assertEqual(warnings, [])
 
 
+class DeployerTest(TestCase):
+    """End-to-end deployment: script lookup-or-create, swap, preserve, purge.
+
+    Uses real Evennia ``create_script`` / DB queries against the test
+    database (``runtests.py`` calls ``evennia._init()`` which sets up
+    the typeclass registry). The script's ``at_repeat`` is a no-op
+    stub at this stage — these tests cover lifecycle plumbing only,
+    not the (still-pending) tick loop.
+    """
+
+    def _make_deployer(self):
+        from evennia_mob_spawner.deployer import Deployer
+        defs = Definitions.from_dict({"levels": []})
+        return Deployer(defs)
+
+    def _rule(self, rule_id, **overrides):
+        # Build a minimally-valid rule shape. The Deployer doesn't
+        # re-validate — rules arrive already validated.
+        base = {
+            "rule_id": rule_id,
+            "typeclass": "evennia.objects.objects.DefaultObject",
+            "key": "a thing",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 30,
+        }
+        base.update(overrides)
+        return base
+
+    def tearDown(self):
+        # Tests share the in-memory DB across methods within a class;
+        # Django's TestCase resets per-test, but ScriptDB rows created
+        # via create_script can persist into the next test if not
+        # cleaned up. Belt-and-suspenders.
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for script in MobSpawnerScript.objects.all():
+            script.delete()
+
+    def test_deploy_creates_new_script(self):
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={
+            "a.yaml": [self._rule(1)],
+        }))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        scripts = MobSpawnerScript.objects.filter(db_key="a.yaml")
+        self.assertEqual(scripts.count(), 1)
+        script = scripts.first()
+        self.assertEqual(len(script.db.spawn_table), 1)
+        self.assertEqual(script.db.spawn_table[0]["rule_id"], 1)
+
+    def test_deploy_separate_files_creates_separate_scripts(self):
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={
+            "a.yaml": [self._rule(1)],
+            "b.yaml": [self._rule(1)],   # same rule_id, different file
+        }))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        self.assertEqual(MobSpawnerScript.objects.filter(db_key="a.yaml").count(), 1)
+        self.assertEqual(MobSpawnerScript.objects.filter(db_key="b.yaml").count(), 1)
+
+    def test_redeploy_reuses_existing_script(self):
+        # Two deploys of the same path should NOT create two scripts.
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1)]}))
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1)]}))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        self.assertEqual(MobSpawnerScript.objects.filter(db_key="a.yaml").count(), 1)
+
+    def test_swap_replaces_spawn_table(self):
+        deployer = self._make_deployer()
+        # First deploy: rules 1, 2.
+        deployer.deploy(LoadResult(rule_sets={
+            "a.yaml": [self._rule(1), self._rule(2)],
+        }))
+        # Second deploy: rules 2, 3 — rule 1 vanished, rule 3 is new.
+        deployer.deploy(LoadResult(rule_sets={
+            "a.yaml": [self._rule(2), self._rule(3)],
+        }))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        ids = {r["rule_id"] for r in script.db.spawn_table}
+        self.assertEqual(ids, {2, 3})
+
+    def test_state_preserved_for_surviving_rules(self):
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(2)]}))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        # Simulate runtime accumulation of state across ticks.
+        script.db.last_spawn_times = {1: 1000.0, 2: 2000.0}
+        script.db.last_death_times = {1: 1500.0, 2: 2500.0}
+        script.db.last_observed_counts = {1: 5, 2: 3}
+
+        # Re-deploy with both rules unchanged.
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(2)]}))
+
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        self.assertEqual(script.db.last_spawn_times, {1: 1000.0, 2: 2000.0})
+        self.assertEqual(script.db.last_death_times, {1: 1500.0, 2: 2500.0})
+        self.assertEqual(script.db.last_observed_counts, {1: 5, 2: 3})
+
+    def test_state_purged_for_removed_rules(self):
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(2)]}))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        script.db.last_spawn_times = {1: 1000.0, 2: 2000.0}
+        script.db.last_death_times = {1: 1500.0, 2: 2500.0}
+        script.db.last_observed_counts = {1: 5, 2: 3}
+
+        # Re-deploy with rule 1 removed.
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(2)]}))
+
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        self.assertEqual(script.db.last_spawn_times, {2: 2000.0})
+        self.assertEqual(script.db.last_death_times, {2: 2500.0})
+        self.assertEqual(script.db.last_observed_counts, {2: 3})
+
+    def test_new_rule_starts_with_no_bookkeeping(self):
+        # rule_id 3 is brand new — no entry in any state dict.
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1)]}))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        script.db.last_spawn_times = {1: 1000.0}
+
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(3)]}))
+
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        self.assertEqual(script.db.last_spawn_times, {1: 1000.0})
+        self.assertNotIn(3, script.db.last_spawn_times)
+
+    def test_empty_load_result_creates_no_scripts(self):
+        deployer = self._make_deployer()
+        deployer.deploy(LoadResult(rule_sets={}))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        self.assertEqual(MobSpawnerScript.objects.count(), 0)
+
+
 class CliScaffoldSmokeTest(TestCase):
     """ms-validate CLI module is importable; parser builds; validate() runs."""
 

@@ -31,6 +31,23 @@ def get_reader_class():
 
 
 DEFAULT_AREA_TAG_CATEGORY = "mob_area"
+DEFAULT_TICK_SECONDS = 15
+
+
+def get_tick_seconds() -> int:
+    """Return the tick interval (seconds) for ``MobSpawnerScript`` instances.
+
+    Architecture decision #3: tick interval is a library-level setting,
+    single value for the whole consuming game. Override via
+    ``settings.MOB_SPAWNER_TICK_SECONDS``; default is 15 seconds —
+    matches FCM's existing convention.
+
+    The setting feeds ``script.interval`` at ``at_script_creation``
+    time. Changing the setting only affects newly created scripts;
+    existing scripts keep their stored ``interval`` value until they
+    are deleted and recreated.
+    """
+    return getattr(settings, "MOB_SPAWNER_TICK_SECONDS", DEFAULT_TICK_SECONDS)
 
 
 def get_area_tag_category() -> str:
