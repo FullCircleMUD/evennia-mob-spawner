@@ -177,11 +177,11 @@ Mirroring world-builder's command pattern: scope-aware admin commands auto-insta
 | **Restart** | Drain → start the existing script's ticker without re-reading YAML. Recovery action for a script that appears stuck or stopped; works when YAML is currently unavailable (Reader fetch failed). | Yes — state preserved; rules unchanged. |
 | **Stop** | Stop the tick on a script; keep the persistent script + state. Resumable via Restart or Load. | Yes — state preserved. |
 | **Delete** | Remove the script entirely from the DB. | No — full clean slate. |
-| **Status / inspect** | Read-only view of a script's rules, cooldowns, population counts, last tick. Surfaces "this script's backing file is missing from the manifest" warnings. | n/a — read-only. |
+| **Status / inspect** | Read-only view of a script's state. One operator-facing line per matched script: ``<path>: <active|stopped>, <N> rule(s), interval=<I>s, next=<T>s``. Per-rule detail is intentionally not included in v0 — operators investigating a specific rule can read `mob_spawner.log` or `@scripts <path>` for the full attribute dump. | n/a — read-only. |
 
 The operator escalation ladder from lightest to heaviest intervention: **Status** (diagnose) → **Restart** (kick the ticker, keep everything) → **Load** (fresh YAML + restart) → **Stop** (intentional pause) → **Delete** (clean slate).
 
-All four accept a scope query in the same form as world-builder's commands (`all`, `shard=X`, `shard=X zone=Y`, …). Scope resolution uses the same Reader / Definitions / Finder pipeline as load.
+All five accept a scope query in the same form as world-builder's commands (`all`, `shard=X`, `shard=X zone=Y`, …). Scope resolution uses the Reader → Definitions → Finder pipeline when a query is non-empty; an `all` query bypasses the manifest and operates on every ``MobSpawnerScript`` instance in the DB (which catches orphan scripts whose source files have been removed from the manifest — see "Edge cases" below).
 
 ### Load protocol
 
@@ -264,4 +264,3 @@ Both libraries share `evennia-yaml-reader` as a runtime dependency for fetching 
 `[TBD — needs discussion]`:
 
 - **`at_server_start` helper name.** Settle during implementation.
-- **`ms_status` output shape.** What information it displays and how it formats. Deferred — better scoped once the library has been exercised in practice.

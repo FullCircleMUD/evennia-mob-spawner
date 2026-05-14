@@ -2,7 +2,55 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-15 — latest
+## 2026-05-15 (mid-morning — latest)
+
+**Full admin command surface shipped: `ms_load` + `ms_stop` + `ms_restart` + `ms_delete` + `ms_status` (architecture decision #7's complete set). Pipeline runs end-to-end in vivo.**
+
+Implementation:
+
+- **[apps.py](../src/evennia_mob_spawner/apps.py) (new)** — `EvenniaMobSpawnerConfig` auto-installs the full command set into `AccountCmdSet`. Same wrap-`evennia._init` pattern as `evennia-world-builder` and `evennia-shards` — the patch is deferred until after `_init()` runs so the lazy `evennia.Command` exports are populated.
+- **[commands.py](../src/evennia_mob_spawner/commands.py)** — extended from the standalone gating helper to ship all five admin commands:
+  - **`ms_load`** — runs the full pipeline (Reader → Definitions → Finder → Loader → Validator with `evennia_runtime=True` → Deployer). Mirrors `wb_build`'s shape: argument parser (`all | <level>=<value>... [--force-validate]`), reactor-side validation followed by `run_async` worker handoff, every operator-facing line collected into a message list and flushed via `at_return`.
+  - **`ms_stop`**, **`ms_restart`**, **`ms_delete`**, **`ms_status`** — share a `_MsOperateBase` scaffold (argument parsing, scope resolution, async dispatch, error handling). Subclasses override one `apply(script, messages)` method.
+- **Scope resolution helper `_resolve_scope_to_scripts(query, reader, definitions)`** — empty query (`all`) bypasses the manifest and operates on every `MobSpawnerScript` instance in the DB (catches orphans whose source files were removed). Non-empty query walks the manifest via Finder; `kind=file` resolves to an exact `db_key` match, `kind=folder` resolves to a `db_key__startswith` prefix match.
+- **`ms_status` output shape pinned** (resolves architecture.md open question): one operator-facing line per matched script: ``<path>: <active|stopped>, <N> rule(s), interval=<I>s, next=<T>s``. Per-rule detail is intentionally not in v0 — operators investigating a specific rule can read `mob_spawner.log` or use Evennia's built-in `@scripts <path>` for the full attribute dump.
+
+**Live smoke verified.** Two `MobSpawnerScript` instances appear in `@scripts` after `ms_load all` (`shard0/millholm.yaml` + `shard0/wilderness.yaml`); both `<Global>`, both ticking at 15s with `start_delay=True` producing a 10s pre-first-tick delay. Operator-facing message confirming Pass A status (tick loop is a no-op stub) comes through cleanly. Full state-transition cycle (active → paused → active) verified end-to-end via `ms_stop` / `ms_restart` / `ms_status` against scope queries.
+
+**Bug caught + fixed during smoke:** initial implementation used `script.is_active` as the state discriminator, but Evennia's `is_active` is True for BOTH running and paused scripts — it flips to False only on `stop()` (or never-started). The actual paused state is tracked via `db._paused_time` (set by `pause()`, cleared by `unpause()` / `_stop_task()`). Without this discrimination, `ms_status` reported paused scripts as "active" and `ms_restart` short-circuited with "already running" without unpausing. Fix: a `_script_state(script)` helper returning `"active"` / `"paused"` / `"stopped"` based on both `is_active` and `db._paused_time`. `ms_stop` only pauses an active script; `ms_restart` handles both transitions (`paused → unpause()`, `stopped → start()`); `ms_status` reports the actual state and only emits `next=` when active.
+
+**139 tests still green** — no library-side regressions from the command additions. Command classes themselves are thin wrappers over already-tested pipeline pieces; the scope-resolution helper is the main new logic, exercisable via the live smoke (unit tests for the helper would require an Evennia test harness — deferred).
+
+One open question resolved: `ms_status` output shape pinned. Architecture.md "Open questions" now contains only `at_server_start` helper name.
+
+Next stage: **Pass B — the tick loop.** Implement `MobSpawnerScript.at_repeat` per architecture.md "The tick loop" (observe → detect deaths → cooldown gate → population gate → room selection → spawn → save state). Plus `stop_when_safe` / `force_stop` primitives for race-safe drain (decision #13), which `ms_load`'s deployer will then use in place of the current `pause()`/`unpause()` (Pass A's interim approach).
+
+## 2026-05-15 (early)
+
+**`ms_load` admin command shipped. Pipeline runs end-to-end in vivo against the test-yaml fixture; two persistent `MobSpawnerScript` instances created and ticking (no-op).**
+
+Implementation:
+
+- **[apps.py](../src/evennia_mob_spawner/apps.py) (new)** — `EvenniaMobSpawnerConfig` auto-installs `CmdMsLoad` into `AccountCmdSet`. Same wrap-`evennia._init` pattern as `evennia-world-builder` and `evennia-shards` — at `ready()` time the lazy `evennia.Command` exports are still `None`, so the patch is deferred until after `_init()` runs. Idempotent via the `_evennia_mob_spawner_cmdset_patched` flag.
+- **[commands.py](../src/evennia_mob_spawner/commands.py)** — extended from the standalone gating helper to ship `CmdMsLoad`:
+  - `key = "ms_load"`, `cmd:superuser()` locked, `help_category = "Mob Spawner"`.
+  - Argument parser identical to `wb_build`'s: `ms_load all | <level>=<value>... [--force-validate]`.
+  - `func()` validates args on the reactor thread, hands the pipeline off to a Twisted worker via `run_async`.
+  - `_run_pipeline` walks Reader → Definitions → Finder → Loader → Validator (`evennia_runtime=True`, so Tier 3 + Tier 4 both fire) → Deployer. Each stage's exceptions caught and routed to operator-facing messages; only unexpected exceptions surface via `at_err`.
+  - Gating uses `should_pre_validate(definitions, flags)` per decision #19.
+  - End-of-run message indicates this stage of the implementation: scripts created, lifecycle working, but `at_repeat` is a no-op stub — Pass B will add the spawn tick.
+
+**Live smoke verified.** Run against `evennia-mob-spawner-test-yaml` (2 files, 5 rules):
+- `ms_load all` ran the full pipeline cleanly.
+- Two `MobSpawnerScript` instances appear in `@scripts`: `shard0/millholm.yaml` (4 rules) and `shard0/wilderness.yaml` (1 rule). Both `<Global>`, both ticking at 15s.
+- `start_delay = True` produces a 10s pre-first-tick delay (visible as `next: 10s` in `@scripts`); intended behaviour, prevents tick from firing instantly on creation before the operator has wired up world content.
+- Operator-facing message indicating Pass B status came through correctly.
+
+**139 tests still green** — no library-side regressions from the command addition.
+
+Next stage: **Pass B — the tick loop.** Implement `MobSpawnerScript.at_repeat` per architecture.md "The tick loop" (observe → detect deaths → cooldown gate → population gate → room selection → spawn → save state). Plus `stop_when_safe` / `force_stop` primitives for race-safe drain (decision #13), which `ms_load`'s deployer will then use in place of the current `pause()`/`unpause()` (Pass A's interim approach).
+
+## 2026-05-15
 
 **Deployer Pass A landed: `MobSpawnerScript` typeclass + upsert protocol. Lifecycle plumbing without tick logic.**
 
