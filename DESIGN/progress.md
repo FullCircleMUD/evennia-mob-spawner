@@ -2,7 +2,26 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-13 (evening — latest)
+## 2026-05-14
+
+**Loader implementation landed; `file_metadata` slot opened mirroring world-builder; two-venv layout pinned.**
+
+Implementation status:
+
+- **Real Loader.** Walks `FoundLocation` (file or folder) following `index.yaml` entries; reads each leaf rule-set file, enforces top-level shape (mapping with a `rules:` list), surfaces `LoadResult.rule_sets` keyed by file path. The flatten-vs-per-file-with-`file_metadata` question flagged in the previous entry is resolved: per-file with `file_metadata`, matching world-builder.
+- **`LoadResult.file_metadata`** is the parallel to world-builder's: any top-level key besides `rules:` lands in `file_metadata[path]`. The library doesn't curate which keys exist; downstream stages look up the keys they care about. A file appears in `file_metadata` only if it declared at least one such key (clean-by-default). No file-level keys are recognised today — the slot is open for future per-file directives without a schema break.
+- **Loader error subclasses landed** under `LoaderError`: `LoaderMissingEntryError` (file referenced in index can't be read), `LoaderMissingIndexError` (folder has no / malformed `index.yaml`), `LoaderInvalidShapeError` (top-level file shape rejected).
+- **9 new `LoaderTest` cases** cover single-file load, folder recursion, `file_metadata` extracted / absent, three shape-rejection paths, missing-file, missing-index. Existing pipeline + CLI smoke tests updated for the real Loader (the CLI smoke now creates a minimal `index.yaml: {entries: []}` alongside `definitions.yaml`, reflecting the Loader's contract that a content repo always has a root manifest).
+- **Two-venv layout pinned.** `evennia-mob-spawner/venv/` (library tests) holds Evennia + `evennia-yaml-reader` + `evennia-mob-spawner` editable, **without** `evennia-world-builder`; the absence enforces architectural independence between the two libraries (an accidental `import evennia_world_builder` in library code fails fast in tests instead of passing silently). `evennia-mob-spawner/examples/venv/` (demo gamedir) holds the same three plus world-builder. Rationale captured in CLAUDE.md "Tools and environment."
+- **31 tests green** in the library-root venv (up from 22).
+
+One decision added to [architecture.md](architecture.md), bringing the count to 20:
+
+20. **Loader uses world-builder's `file_metadata` pattern.** Each leaf rule-set file is a top-level mapping with one canonical list-bearing key (`rules:`); any other top-level keys are bagged into `LoadResult.file_metadata[path]` for downstream stages to look up.
+
+Next stage: real Validator. Tier 1 (rule shape — required fields, types, field-pair exclusivity for `respawn_seconds` xor `death_cooldown_seconds`) + Tier 2 (`rule_id` unique within file) + a shape check on `file_metadata` ("must be a mapping if present").
+
+## 2026-05-13 (evening)
 
 **Pipeline scaffold + Finder implemented; demo gamedir running end-to-end against world-builder.**
 

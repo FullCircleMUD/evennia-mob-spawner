@@ -17,8 +17,12 @@ from evennia_mob_spawner.errors import (
     DefinitionsError,
     FinderManifestError,
     FinderQueryError,
+    LoaderInvalidShapeError,
+    LoaderMissingEntryError,
+    LoaderMissingIndexError,
 )
 from evennia_mob_spawner.finder import Finder, FoundLocation
+from evennia_mob_spawner.loader import Loader, LoadResult
 from evennia_mob_spawner.log import ms_log
 
 
@@ -99,7 +103,6 @@ class PipelineScaffoldSmokeTest(TestCase):
 
     def test_pipeline_flows_end_to_end(self):
         from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.loader import Loader, LoadResult
         from evennia_mob_spawner.validator import Validator
 
         reader = FixtureReader(SCAFFOLD)
@@ -115,7 +118,13 @@ class PipelineScaffoldSmokeTest(TestCase):
 
         load_result = loader.load(found)
         self.assertIsInstance(load_result, LoadResult)
-        self.assertEqual(load_result.rule_sets, {})
+        # Loader walks SCAFFOLD root → 3 leaf rule-set files, all empty,
+        # no file-level metadata on any of them.
+        self.assertEqual(
+            set(load_result.rule_sets.keys()),
+            {"shard1.yaml", "shard0/millholm.yaml", "shard0/wilderness.yaml"},
+        )
+        self.assertEqual(load_result.file_metadata, {})
 
         validator.validate(load_result)  # no errors → no raise
         deployer.deploy(load_result)  # no-op
@@ -218,6 +227,130 @@ class FinderTest(TestCase):
             finder.find({"shard": "x"})
 
 
+class LoaderTest(TestCase):
+    """Verify Loader.load() against synthetic fixture trees."""
+
+    def _make_loader(self, files: dict):
+        reader = FixtureReader(files)
+        defs = Definitions.from_reader(reader)
+        return reader, Loader(reader, defs)
+
+    def test_loads_single_file_with_rules(self):
+        rule = {"rule_id": 1, "typeclass": "x.Y", "key": "a thing"}
+        files = {
+            "definitions.yaml": {"levels": []},
+            "lone.yaml": {"rules": [rule]},
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="lone.yaml", kind="file", location={})
+
+        result = loader.load(found)
+        self.assertEqual(result.rule_sets, {"lone.yaml": [rule]})
+        self.assertEqual(result.file_metadata, {})
+
+    def test_loads_folder_recursively(self):
+        _, loader = self._make_loader(SCAFFOLD)
+        found = FoundLocation(path="", kind="folder", location={})
+
+        result = loader.load(found)
+        self.assertEqual(
+            set(result.rule_sets.keys()),
+            {"shard1.yaml", "shard0/millholm.yaml", "shard0/wilderness.yaml"},
+        )
+        for rule_list in result.rule_sets.values():
+            self.assertEqual(rule_list, [])
+        self.assertEqual(result.file_metadata, {})
+
+    def test_file_metadata_extracted_when_present(self):
+        files = {
+            "definitions.yaml": {"levels": []},
+            "with_meta.yaml": {
+                "rules": [{"rule_id": 1}],
+                "display_name": "Test Zone",
+                "frozen": True,
+            },
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="with_meta.yaml", kind="file", location={})
+
+        result = loader.load(found)
+        self.assertEqual(result.rule_sets, {"with_meta.yaml": [{"rule_id": 1}]})
+        self.assertEqual(
+            result.file_metadata,
+            {"with_meta.yaml": {"display_name": "Test Zone", "frozen": True}},
+        )
+
+    def test_file_metadata_absent_when_only_rules_key(self):
+        files = {
+            "definitions.yaml": {"levels": []},
+            "rules_only.yaml": {"rules": [{"rule_id": 1}]},
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="rules_only.yaml", kind="file", location={})
+
+        result = loader.load(found)
+        # Path absent from file_metadata when no non-`rules:` keys exist —
+        # the dict stays clean-by-default.
+        self.assertNotIn("rules_only.yaml", result.file_metadata)
+
+    def test_bare_list_rejected(self):
+        files = {
+            "definitions.yaml": {"levels": []},
+            "bare.yaml": [{"rule_id": 1}],  # top-level list, not a mapping
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="bare.yaml", kind="file", location={})
+
+        with self.assertRaises(LoaderInvalidShapeError):
+            loader.load(found)
+
+    def test_top_level_missing_rules_key_rejected(self):
+        files = {
+            "definitions.yaml": {"levels": []},
+            "no_rules.yaml": {"other_key": []},
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="no_rules.yaml", kind="file", location={})
+
+        with self.assertRaises(LoaderInvalidShapeError):
+            loader.load(found)
+
+    def test_rules_value_not_a_list_rejected(self):
+        files = {
+            "definitions.yaml": {"levels": []},
+            "bad.yaml": {"rules": "not a list"},
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="bad.yaml", kind="file", location={})
+
+        with self.assertRaises(LoaderInvalidShapeError):
+            loader.load(found)
+
+    def test_missing_referenced_file_raises_missing_entry(self):
+        # index.yaml claims `gone.yaml` exists, but the fixture omits it.
+        files = {
+            "definitions.yaml": {"levels": []},
+            "index.yaml": {"entries": [{"name": "gone", "kind": "file"}]},
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="", kind="folder", location={})
+
+        with self.assertRaises(LoaderMissingEntryError):
+            loader.load(found)
+
+    def test_missing_folder_index_raises_missing_index(self):
+        # index.yaml claims `sub` is a folder, but `sub/index.yaml` is absent.
+        files = {
+            "definitions.yaml": {"levels": []},
+            "index.yaml": {"entries": [{"name": "sub", "kind": "folder"}]},
+        }
+        _, loader = self._make_loader(files)
+        found = FoundLocation(path="", kind="folder", location={})
+
+        with self.assertRaises(LoaderMissingIndexError):
+            loader.load(found)
+
+
 class CliScaffoldSmokeTest(TestCase):
     """ms-validate CLI module is importable; parser builds; validate() runs."""
 
@@ -237,8 +370,11 @@ class CliScaffoldSmokeTest(TestCase):
         from evennia_mob_spawner.cli import validate
 
         with tempfile.TemporaryDirectory() as tmp:
-            # Minimal valid definitions.yaml — empty levels.
+            # Minimal valid repo — empty levels, empty manifest. A content
+            # repo always has a root index.yaml; the Loader's contract is
+            # to refuse if it's missing.
             (Path(tmp) / "definitions.yaml").write_text("levels: []\n")
+            (Path(tmp) / "index.yaml").write_text("entries: []\n")
             exit_code = validate(["--reader", "local", "--root", tmp])
             self.assertEqual(exit_code, 0)
 

@@ -98,7 +98,9 @@ evennia-mob-spawner/
 - Evennia is a runtime dependency (`pip install evennia`).
 - **Tests use Django's test runner via `runtests.py`, not pytest.** No consumer gamedir required. Pattern mirrors `evennia-shards`.
 - YAML parsing: PyYAML (`yaml.safe_load`). Schema validation: hand-written predicates rather than a schema library — same approach as `evennia-world-builder`; rationale to be captured in DESIGN/ when the validator lands.
-- Dedicated venv at `evennia-mob-spawner/venv/` (gitignored). Development install via `pip install -e .`.
+- **Two venvs, both gitignored.** The split is load-bearing:
+  - `evennia-mob-spawner/venv/` is the library test venv — `runtests.py` runs against this. Install: `evennia`, `evennia-yaml-reader` (editable), and `evennia-mob-spawner` itself (`pip install -e .`). **Do not install `evennia-world-builder` here.** The library is independent of world-builder by architecture (siblings, not stacked); keeping world-builder out of the test venv is what enforces that — any accidental `import evennia_world_builder` in library code fails fast in tests instead of passing silently.
+  - `evennia-mob-spawner/examples/venv/` is the demo gamedir venv. Install: the same three plus `evennia-world-builder` (editable). The demo gamedir wires both libraries into `INSTALLED_APPS` to exercise the seam between them in vivo; running `evennia start` from `examples/demo_game/` needs both.
 
 ## Sibling libraries to reference
 
