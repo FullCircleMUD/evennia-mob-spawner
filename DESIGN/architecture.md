@@ -81,22 +81,22 @@ Every rule carries a mandatory author-supplied **`rule_id` integer, unique withi
 
 ## Rule schema (v0)
 
-Inherits today's FCM JSON shape, plus `rule_id`. Fields settle as work lands; iterate when concrete needs surface.
+Inherits today's FCM JSON shape, plus `rule_id`. Mandatory-vs-optional split is calibrated against the consumer baseline (decision #21). Fields settle as work lands; iterate when concrete needs surface.
 
-| Field | Required | Notes |
+| Field | Required | What it does |
 |---|---|---|
-| `rule_id` | ✓ | Integer, unique within file. |
-| `typeclass` | ✓ | Dotted path. Exact match for counts (see [Decision 9](#agreed-decisions)). |
-| `key` | ✓ | Spawned mob's display name. Same key across typeclasses is permitted — enables the "indistinguishable variant" pattern. |
-| `area_tag` | ✓ | Tag key under the configured category. |
-| `target` | ✓ | Population cap. |
-| `respawn_seconds` / `death_cooldown_seconds` | one or the other | Mutually exclusive. |
-| `max_per_room` | optional | Default `[TBD]` during implementation. |
-| `desc` | optional | Description override; falls back to typeclass default if absent. |
-| `attrs` | optional | Dict of per-rule attribute overrides applied to the spawned mob. |
-| `post_spawn_hook` | optional | Dotted path; called with the new mob after creation. |
-| `spawn_with_typeclass` | optional | Pack-spawn trigger — room must contain a living instance of this typeclass. |
-| `den_room_tag` | optional | Single-room lair. Tag-category question deferred — see [Open questions](#open-questions). |
+| `rule_id` | ✓ | Author-supplied integer, unique within file. The persistent Script's bookkeeping (cooldown clocks, observation history) is keyed by it. Stable across YAML reordering / field edits; changing the ID is the explicit signal that this is a different rule and cooldown history does not carry forward (decision #10). |
+| `typeclass` | ✓ | Dotted path to the typeclass that spawns. Exact match (not subclass-inclusive) for population counting — enables the indistinguishable-variant pattern (decision #9). |
+| `key` | ✓ | The spawned mob's `key` (display name). Same key across rules / typeclasses is permitted. |
+| `area_tag` | ✓ | Tag key (under the configured `mob_area` category) defining the rule's world: the room pool spawns can land in, the set the library counts population against, and the tag re-stamped on each spawned mob for the consumer's AI / wander logic (decision #2). |
+| `target` | ✓ | Population cap — how many of this rule's mobs should be alive at once. Positive integer (>= 1). |
+| `max_per_room` | ✓ | Per-room cap for this rule's mobs; respected by all three room-selection patterns. Positive integer (>= 1). |
+| `respawn_seconds` / `death_cooldown_seconds` | exactly one of | The rule's cooldown gate. `respawn_seconds`: clock measured from `last_spawn_time` — rate-limits spawn pace, applies regardless of whether the previous mob is alive or dead. `death_cooldown_seconds`: clock measured from `last_death_time` — grace period after a kill, useful for bosses where the area should feel depleted post-kill. Non-negative number; 0 means no effective cooldown. Mutually exclusive — never both, never neither. |
+| `desc` | optional | Description override applied after `at_object_creation`. Falls back to the typeclass default when absent. |
+| `attrs` | optional | Mapping of `{attribute_name: value}` overrides applied to the spawned mob. The library applies them generically; semantics belong to the consumer's typeclass. |
+| `post_spawn_hook` | optional | Dotted path to a callable `fn(mob) -> None`, invoked after the mob is fully constructed and `attrs` overrides are applied. For per-spawn state init that `at_object_creation` and `attrs` can't handle (e.g. boss rally-cry flags). |
+| `spawn_with_typeclass` | optional | Pack-spawn trigger (Step 1 of room selection): spawn into the room currently containing a living instance of this typeclass within the rule's `area_tag`. Falls through to den / random if no leader is found. |
+| `den_room_tag` | optional | Single-room lair (Step 2 of room selection): spawn into the one room tagged with this key. Uses the same `mob_area` tag category as `area_tag` (decision #16); the distinction is the rule field that references the tag, not the category. Falls through to random `area_tag` pool if the den is full. |
 
 ## The tick loop
 
@@ -122,13 +122,13 @@ Rooms carry an Evennia tag whose **category is consumer-configured** (default `"
 
 ### Room-selection (three-tier fallback)
 
-Three patterns, in order of specificity:
+Three patterns, **layered** within a single rule — a rule may declare any combination of them and the algorithm walks them in fixed order, using the first that yields an eligible room (see [Decision 22](#agreed-decisions)):
 
 1. **Pack spawning** — `spawn_with_typeclass: <dotted_path>` means "spawn me in a room that already contains a living instance of that typeclass" (e.g. a chieftain spawns where its pack already is).
-2. **Den / lair** — `den_room_tag: <key>` means "always spawn in this one specific tagged room" (single-room boss lair).
-3. **Random within area** — default; uniform pick from all rooms in the rule's `area_tag` that haven't hit `max_per_room`.
+2. **Den / lair** — `den_room_tag: <key>` means "spawn in this one specific tagged room" (single-room boss lair). Used as Step 2 when `spawn_with_typeclass` is absent or its leader can't be found / its room is full.
+3. **Random within area** — implicit default; uniform pick from all rooms in the rule's `area_tag` that haven't hit `max_per_room`. Used when neither Step 1 nor Step 2 yielded a room.
 
-All three respect `max_per_room`. All three are tag-or-typeclass queries; no room dbrefs ever travel through rule data.
+All three respect `max_per_room`. All three are tag-or-typeclass queries; no room dbrefs ever travel through rule data. Mixing two or more in one rule is the intentional way to author "prefer pack-spawn, fall back to den, fall back to random" choreography (e.g. a champion that spawns next to its commander but retreats to its den if the commander is dead).
 
 ### Population maintenance
 
@@ -241,6 +241,8 @@ The library exposes a helper (name [TBD]) the consumer calls from `server/conf/a
 18. **`ms_restart` is a first-class operator command.** Kicks the ticker on an existing script without re-reading YAML; preserves state. Recovery action for stuck / stopped scripts; works when YAML is unavailable (Reader fetch failed). Sits between `ms_status` and `ms_load` on the escalation ladder. Composition of `script.stop_when_safe()` + `script.start()` — both primitives already needed for `ms_stop` and `ms_load`.
 19. **Validation gating mirrors world-builder.** Three tiers (shape / per-file uniqueness / engine-resolvability); no Tier 4 (no cross-rule references). `repo-ci-pre-validation` flag in `definitions.yaml` (same name as world-builder) lets a consumer skip whole-repo Tier 1+2 in `ms_load` when CI has already gated the YAML. `ms_load --force-validate` overrides per-invocation. Standalone **`ms-validate`** CLI runs Tier 1+2 without Evennia for local iteration / pre-commit / CI. See [Validation tiering and gating](#validation-tiering-and-gating).
 20. **Loader uses world-builder's `file_metadata` pattern.** Each leaf rule-set file is a top-level mapping with one canonical list-bearing key (`rules:`); any other top-level keys are bagged into `LoadResult.file_metadata[path]` as `{key: value}` for downstream stages to look up. The library doesn't curate which keys exist — none are recognised today, the slot exists so per-file directives can land later without a schema break. Mirrors `evennia-world-builder`'s `entities:` + `incoming_exits:` / `links:` shape so authors see the same file-shape conventions across both libraries; a file appears in `file_metadata` only if it declared at least one non-`rules:` key (clean-by-default).
+21. **Mandatory-vs-optional follows the consumer baseline.** The schema's required-field set is calibrated against the existing FCM `world/spawns/*.json` corpus (87 rules across 10 zones). Fields that 100% of authored rules set are mandatory in the library (`typeclass`, `key`, `area_tag`, `target`, `max_per_room`, plus exactly one of the cooldown pair). Fields that the consumer uses optionally are optional here (`desc`, `attrs`, `post_spawn_hook`, `spawn_with_typeclass`, `den_room_tag`). Cooldown pair is mandatory **as a pair** but mutually exclusive — empirically every consumer rule declares exactly one, never both, never neither, so the contract resolves the earlier "one or the other" ambiguity to **exactly one of**. The library's `rule_id` is the lone exception: it's mandatory here but doesn't appear in the consumer baseline (the consumer used `f"{typeclass}:{area_tag}"` as bookkeeping handle; decision #10 replaced that with author-supplied integer IDs).
+22. **Room-selection patterns layer within a single rule; not mutually exclusive.** `spawn_with_typeclass`, `den_room_tag`, and the implicit random-area default can all coexist in one rule. The room-selection algorithm walks them in fixed order (pack → den → random) and uses the first that yields an eligible room. Mixing patterns is the explicit way to author meaningful choreography (e.g. "spawn next to the boss, but fall back to the den if the boss is dead, then to random within the area"). The validator does NOT refuse rules that set multiple patterns — the algorithm's natural fallthrough is the intended semantic. The architecture text's earlier "three patterns, in order of specificity" phrasing was clarified here to make the layering explicit.
 
 ## The seam with world-builder
 
@@ -254,7 +256,6 @@ Both libraries share `evennia-yaml-reader` as a runtime dependency for fetching 
 
 `[TBD — needs discussion]`:
 
-- **Default value for `max_per_room`** when unspecified. Probably 1; confirm during implementation.
 - **Default tick interval value.** Today's FCM script uses 15s — reasonable starting point.
 - **`at_server_start` helper name.** Settle during implementation.
 - **`ms_status` output shape.** What information it displays and how it formats. Deferred — better scoped once the library has been exercised in practice.

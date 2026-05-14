@@ -21,8 +21,10 @@ from evennia_mob_spawner.errors import (
     LoaderMissingEntryError,
     LoaderMissingIndexError,
 )
+from evennia_mob_spawner.commands import FORCE_VALIDATE_FLAG, should_pre_validate
 from evennia_mob_spawner.finder import Finder, FoundLocation
 from evennia_mob_spawner.loader import Loader, LoadResult
+from evennia_mob_spawner.validator import LoadedRule, Validator
 from evennia_mob_spawner.log import ms_log
 
 
@@ -349,6 +351,719 @@ class LoaderTest(TestCase):
 
         with self.assertRaises(LoaderMissingIndexError):
             loader.load(found)
+
+
+class ValidatorStructureTest(TestCase):
+    """Verify the Validator's tier scaffold flows cleanly with no predicates.
+
+    Predicate tuples are deliberately empty at this stage — these tests
+    exercise the structure (Tier 1 dispatch, Tier 2 entry point,
+    evennia_runtime gating, file_metadata pass, seen_ids state, the
+    error-funnel discipline). Predicate-specific tests land alongside
+    concrete predicates in later passes.
+    """
+
+    def _make_validator(self, **kwargs):
+        defs = Definitions.from_dict({"levels": []})
+        return Validator(defs, **kwargs)
+
+    def test_empty_load_result_passes_clean(self):
+        v = self._make_validator()
+        v.validate(LoadResult())
+        self.assertEqual(v.errors, [])
+        self.assertEqual(v.messages, [])
+
+    def test_load_result_with_valid_rules_passes(self):
+        # Multiple files, multiple rules per file, all fully valid —
+        # exercises the dispatch loop through real predicates.
+        v = self._make_validator()
+        valid_rule = {
+            "rule_id": 1,
+            "typeclass": "test.Foo",
+            "key": "a thing",
+            "area_tag": "test_area",
+            "target": 3,
+            "max_per_room": 1,
+            "respawn_seconds": 60,
+        }
+        v.validate(LoadResult(
+            rule_sets={
+                "a.yaml": [valid_rule, {**valid_rule, "rule_id": 2}],
+                "b.yaml": [{**valid_rule, "rule_id": 1}],
+            },
+        ))
+        self.assertEqual(v.errors, [])
+
+    def test_seen_ids_initialised_empty(self):
+        v = self._make_validator()
+        self.assertEqual(v.seen_ids, {})
+
+    def test_active_predicates_excludes_tier_3_by_default(self):
+        v = self._make_validator()
+        # Both tuples are empty so the concatenation is also empty; the
+        # property we care about is that evennia_runtime=False does not
+        # include EVENNIA_ONLY_PREDICATES in the active set.
+        self.assertEqual(v._active_predicates(), Validator.PER_RULE_PREDICATES)
+
+    def test_active_predicates_includes_tier_3_when_engine_flag_set(self):
+        v = self._make_validator(evennia_runtime=True)
+        expected = Validator.PER_RULE_PREDICATES + Validator.EVENNIA_ONLY_PREDICATES
+        self.assertEqual(v._active_predicates(), expected)
+
+    def test_record_finding_appends_to_both_messages_and_errors(self):
+        v = self._make_validator()
+        v._record_finding("a finding")
+        self.assertEqual(v.messages, ["a finding"])
+        self.assertEqual(v.errors, ["a finding"])
+
+    def test_validate_raises_when_errors_accumulated(self):
+        # Synthesise a single Tier 1 predicate that always flags so we
+        # can verify validate() raises ValidatorError after collecting.
+        v = self._make_validator()
+
+        def always_flags(loaded):
+            return f"{loaded.path}: synthetic finding for rule_id {loaded.rule.get('rule_id')}"
+
+        original = Validator.PER_RULE_PREDICATES
+        Validator.PER_RULE_PREDICATES = (always_flags,)
+        try:
+            from evennia_mob_spawner.errors import ValidatorError
+            with self.assertRaises(ValidatorError):
+                v.validate(LoadResult(
+                    rule_sets={"a.yaml": [{"rule_id": 1}, {"rule_id": 2}]},
+                ))
+            # Both rules should be checked before the raise — discipline:
+            # gather every finding, then refuse.
+            self.assertEqual(len(v.errors), 2)
+        finally:
+            Validator.PER_RULE_PREDICATES = original
+
+    def test_loaded_rule_is_frozen_dataclass(self):
+        loaded = LoadedRule(path="a.yaml", rule={"rule_id": 1})
+        self.assertEqual(loaded.path, "a.yaml")
+        self.assertEqual(loaded.rule, {"rule_id": 1})
+        with self.assertRaises(Exception):
+            loaded.path = "b.yaml"  # frozen — must refuse mutation
+
+
+class ShouldPreValidateTest(TestCase):
+    """The 2x2 of (setting, flag) → pre-validation decision."""
+
+    def _defs(self, *, repo_ci: bool):
+        return Definitions.from_dict({
+            "levels": [],
+            "repo-ci-pre-validation": repo_ci,
+        })
+
+    def test_setting_false_no_flag_runs_pre_validation(self):
+        # Default safe — consumer has not claimed CI gating, so the
+        # admin command pre-validates the whole repo every time.
+        self.assertTrue(should_pre_validate(self._defs(repo_ci=False), flags=set()))
+
+    def test_setting_true_no_flag_skips_pre_validation(self):
+        # Consumer asserts CI gates the YAML; ms_load trusts the gate
+        # and runs only scope-level checks.
+        self.assertFalse(should_pre_validate(self._defs(repo_ci=True), flags=set()))
+
+    def test_setting_true_with_flag_runs_pre_validation(self):
+        # Flag overrides the trust signal.
+        self.assertTrue(should_pre_validate(
+            self._defs(repo_ci=True), flags={FORCE_VALIDATE_FLAG},
+        ))
+
+    def test_setting_false_with_flag_runs_pre_validation(self):
+        # Flag is harmless when the setting already mandates pre-validation.
+        self.assertTrue(should_pre_validate(
+            self._defs(repo_ci=False), flags={FORCE_VALIDATE_FLAG},
+        ))
+
+    def test_unrelated_flags_do_not_trigger(self):
+        # Only `force-validate` is the override; other flags are ignored.
+        self.assertFalse(should_pre_validate(
+            self._defs(repo_ci=True), flags={"verbose", "dry-run"},
+        ))
+
+
+_VALID_RULE = {
+    "rule_id": 1,
+    "typeclass": "test.Foo",
+    "key": "a thing",
+    "area_tag": "test_area",
+    "target": 3,
+    "respawn_seconds": 30,
+    "max_per_room": 2,
+    "desc": "hello",
+    "attrs": {"hp": 10},
+    "post_spawn_hook": "hooks.do_thing",
+    "spawn_with_typeclass": "test.Boss",
+    "den_room_tag": "lair",
+}
+
+
+class FieldPredicatesHappyPathTest(TestCase):
+    """Every Tier 1 predicate accepts a fully-valid rule."""
+
+    def test_all_predicates_return_none_for_valid_rule(self):
+        loaded = LoadedRule("a.yaml", _VALID_RULE)
+        # death_cooldown_seconds is absent → that predicate's happy path
+        # is the absent-case (returns None on missing optional). All
+        # other predicates see a valid field value.
+        for predicate in Validator.PER_RULE_PREDICATES:
+            with self.subTest(predicate=predicate.__name__):
+                self.assertIsNone(predicate(loaded))
+
+    def test_field_predicates_short_circuit_on_non_dict(self):
+        # _check_rule_is_mapping owns the non-mapping finding; the other
+        # 13 predicates must return None to avoid cascading findings on
+        # the same rule.
+        from evennia_mob_spawner import validator as v
+        non_mapping_predicates = [
+            p for p in Validator.PER_RULE_PREDICATES
+            if p is not v._check_rule_is_mapping
+        ]
+        for predicate in non_mapping_predicates:
+            with self.subTest(predicate=predicate.__name__):
+                self.assertIsNone(predicate(LoadedRule("a.yaml", "not a dict")))
+                self.assertIsNone(predicate(LoadedRule("a.yaml", [1, 2])))
+                self.assertIsNone(predicate(LoadedRule("a.yaml", None)))
+
+
+class RuleMappingPredicateTest(TestCase):
+    """`_check_rule_is_mapping` produces one clean finding for non-dict rules."""
+
+    def _predicate(self):
+        from evennia_mob_spawner.validator import _check_rule_is_mapping
+        return _check_rule_is_mapping
+
+    def test_dict_passes(self):
+        self.assertIsNone(self._predicate()(LoadedRule("p", {"rule_id": 1})))
+
+    def test_list_rejected(self):
+        finding = self._predicate()(LoadedRule("p", ["x"]))
+        self.assertIn("rule entries must be mappings", finding)
+        self.assertIn("got list", finding)
+
+    def test_string_rejected(self):
+        finding = self._predicate()(LoadedRule("p", "scalar"))
+        self.assertIn("got str", finding)
+
+    def test_none_rejected(self):
+        finding = self._predicate()(LoadedRule("p", None))
+        self.assertIn("got NoneType", finding)
+
+
+class RequiredFieldPredicatesTest(TestCase):
+    """Required fields: missing / wrong-type / bad-value cases."""
+
+    def _without(self, field):
+        return {k: v for k, v in _VALID_RULE.items() if k != field}
+
+    def _with(self, **overrides):
+        return {**_VALID_RULE, **overrides}
+
+    # rule_id ---------------------------------------------------------
+
+    def test_rule_id_missing(self):
+        from evennia_mob_spawner.validator import _check_rule_id_well_formed
+        finding = _check_rule_id_well_formed(LoadedRule("p", self._without("rule_id")))
+        self.assertIn("missing required field 'rule_id'", finding)
+
+    def test_rule_id_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_rule_id_well_formed
+        finding = _check_rule_id_well_formed(LoadedRule("p", self._with(rule_id="1")))
+        self.assertIn("'rule_id' must be an integer", finding)
+        self.assertIn("got str", finding)
+
+    def test_rule_id_bool_rejected(self):
+        # bool is technically int in Python — exclude explicitly.
+        from evennia_mob_spawner.validator import _check_rule_id_well_formed
+        finding = _check_rule_id_well_formed(LoadedRule("p", self._with(rule_id=True)))
+        self.assertIn("'rule_id' must be an integer", finding)
+        self.assertIn("got bool", finding)
+
+    def test_rule_id_negative_rejected(self):
+        from evennia_mob_spawner.validator import _check_rule_id_well_formed
+        finding = _check_rule_id_well_formed(LoadedRule("p", self._with(rule_id=-1)))
+        self.assertIn("must be non-negative", finding)
+
+    def test_rule_id_zero_accepted(self):
+        from evennia_mob_spawner.validator import _check_rule_id_well_formed
+        self.assertIsNone(
+            _check_rule_id_well_formed(LoadedRule("p", self._with(rule_id=0)))
+        )
+
+    # typeclass -------------------------------------------------------
+
+    def test_typeclass_missing(self):
+        from evennia_mob_spawner.validator import _check_typeclass_well_formed
+        finding = _check_typeclass_well_formed(LoadedRule("p", self._without("typeclass")))
+        self.assertIn("missing required field 'typeclass'", finding)
+
+    def test_typeclass_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_typeclass_well_formed
+        finding = _check_typeclass_well_formed(LoadedRule("p", self._with(typeclass=42)))
+        self.assertIn("'typeclass' must be a string", finding)
+
+    def test_typeclass_empty_rejected(self):
+        from evennia_mob_spawner.validator import _check_typeclass_well_formed
+        finding = _check_typeclass_well_formed(LoadedRule("p", self._with(typeclass="  ")))
+        self.assertIn("must be a non-empty string", finding)
+
+    # key -------------------------------------------------------------
+
+    def test_key_missing(self):
+        from evennia_mob_spawner.validator import _check_key_well_formed
+        finding = _check_key_well_formed(LoadedRule("p", self._without("key")))
+        self.assertIn("missing required field 'key'", finding)
+
+    def test_key_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_key_well_formed
+        finding = _check_key_well_formed(LoadedRule("p", self._with(key=None)))
+        self.assertIn("'key' must be a string", finding)
+
+    def test_key_empty_rejected(self):
+        from evennia_mob_spawner.validator import _check_key_well_formed
+        finding = _check_key_well_formed(LoadedRule("p", self._with(key="")))
+        self.assertIn("must be a non-empty string", finding)
+
+    # area_tag --------------------------------------------------------
+
+    def test_area_tag_missing(self):
+        from evennia_mob_spawner.validator import _check_area_tag_well_formed
+        finding = _check_area_tag_well_formed(LoadedRule("p", self._without("area_tag")))
+        self.assertIn("missing required field 'area_tag'", finding)
+
+    def test_area_tag_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_area_tag_well_formed
+        finding = _check_area_tag_well_formed(LoadedRule("p", self._with(area_tag=["a"])))
+        self.assertIn("'area_tag' must be a string", finding)
+
+    def test_area_tag_empty_rejected(self):
+        from evennia_mob_spawner.validator import _check_area_tag_well_formed
+        finding = _check_area_tag_well_formed(LoadedRule("p", self._with(area_tag="")))
+        self.assertIn("must be a non-empty string", finding)
+
+    # target ----------------------------------------------------------
+
+    def test_target_missing(self):
+        from evennia_mob_spawner.validator import _check_target_well_formed
+        finding = _check_target_well_formed(LoadedRule("p", self._without("target")))
+        self.assertIn("missing required field 'target'", finding)
+
+    def test_target_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_target_well_formed
+        finding = _check_target_well_formed(LoadedRule("p", self._with(target=1.5)))
+        self.assertIn("'target' must be an integer", finding)
+
+    def test_target_bool_rejected(self):
+        from evennia_mob_spawner.validator import _check_target_well_formed
+        finding = _check_target_well_formed(LoadedRule("p", self._with(target=True)))
+        self.assertIn("got bool", finding)
+
+    def test_target_zero_rejected(self):
+        from evennia_mob_spawner.validator import _check_target_well_formed
+        finding = _check_target_well_formed(LoadedRule("p", self._with(target=0)))
+        self.assertIn("'target' must be at least 1", finding)
+
+    # max_per_room ----------------------------------------------------
+
+    def test_max_per_room_missing(self):
+        from evennia_mob_spawner.validator import _check_max_per_room_well_formed
+        finding = _check_max_per_room_well_formed(
+            LoadedRule("p", self._without("max_per_room")),
+        )
+        self.assertIn("missing required field 'max_per_room'", finding)
+
+    def test_max_per_room_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_max_per_room_well_formed
+        finding = _check_max_per_room_well_formed(
+            LoadedRule("p", self._with(max_per_room=1.5)),
+        )
+        self.assertIn("'max_per_room' must be an integer", finding)
+
+    def test_max_per_room_zero_rejected(self):
+        from evennia_mob_spawner.validator import _check_max_per_room_well_formed
+        finding = _check_max_per_room_well_formed(
+            LoadedRule("p", self._with(max_per_room=0)),
+        )
+        self.assertIn("must be at least 1", finding)
+
+
+class CooldownExclusivityPredicateTest(TestCase):
+    """`_check_cooldown_exclusivity` — exactly one of the cooldown pair."""
+
+    def _predicate(self):
+        from evennia_mob_spawner.validator import _check_cooldown_exclusivity
+        return _check_cooldown_exclusivity
+
+    def _rule(self, **overrides):
+        # Strip both cooldowns from _VALID_RULE, then add what each test wants.
+        base = {k: v for k, v in _VALID_RULE.items()
+                if k not in ("respawn_seconds", "death_cooldown_seconds")}
+        base.update(overrides)
+        return base
+
+    def test_only_respawn_seconds_passes(self):
+        self.assertIsNone(self._predicate()(
+            LoadedRule("p", self._rule(respawn_seconds=60)),
+        ))
+
+    def test_only_death_cooldown_seconds_passes(self):
+        self.assertIsNone(self._predicate()(
+            LoadedRule("p", self._rule(death_cooldown_seconds=120)),
+        ))
+
+    def test_both_present_rejected(self):
+        finding = self._predicate()(LoadedRule("p", self._rule(
+            respawn_seconds=60, death_cooldown_seconds=120,
+        )))
+        self.assertIn("mutually exclusive", finding)
+
+    def test_neither_present_rejected(self):
+        finding = self._predicate()(LoadedRule("p", self._rule()))
+        self.assertIn("must declare exactly one of", finding)
+
+    def test_presence_is_dict_key_level_not_value_validity(self):
+        # Author writes `respawn_seconds: null` plus a real
+        # death_cooldown_seconds. Exclusivity sees BOTH keys present —
+        # rejects. (Value validity is the per-field predicate's concern.)
+        finding = self._predicate()(LoadedRule("p", self._rule(
+            respawn_seconds=None, death_cooldown_seconds=60,
+        )))
+        self.assertIn("mutually exclusive", finding)
+
+
+class OptionalNumericPredicatesTest(TestCase):
+    """Optional numeric fields: absent / wrong-type / bad-value cases."""
+
+    def _rule(self, **fields):
+        # Strip both cooldowns so each test can put one back as appropriate
+        # without colliding with the cooldown_exclusivity predicate.
+        base = {k: v for k, v in _VALID_RULE.items()
+                if k not in ("respawn_seconds", "death_cooldown_seconds")}
+        base.update(fields)
+        return base
+
+    # respawn_seconds -------------------------------------------------
+
+    def test_respawn_seconds_absent_passes(self):
+        from evennia_mob_spawner.validator import _check_respawn_seconds_well_formed
+        self.assertIsNone(_check_respawn_seconds_well_formed(LoadedRule("p", self._rule())))
+
+    def test_respawn_seconds_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_respawn_seconds_well_formed
+        finding = _check_respawn_seconds_well_formed(
+            LoadedRule("p", self._rule(respawn_seconds="60")),
+        )
+        self.assertIn("'respawn_seconds' must be a number", finding)
+
+    def test_respawn_seconds_bool_rejected(self):
+        from evennia_mob_spawner.validator import _check_respawn_seconds_well_formed
+        finding = _check_respawn_seconds_well_formed(
+            LoadedRule("p", self._rule(respawn_seconds=False)),
+        )
+        self.assertIn("must be a number", finding)
+        self.assertIn("got bool", finding)
+
+    def test_respawn_seconds_negative_rejected(self):
+        from evennia_mob_spawner.validator import _check_respawn_seconds_well_formed
+        finding = _check_respawn_seconds_well_formed(
+            LoadedRule("p", self._rule(respawn_seconds=-1)),
+        )
+        self.assertIn("must be non-negative", finding)
+
+    def test_respawn_seconds_zero_accepted(self):
+        # 0 means "no cooldown" — explicit, valid.
+        from evennia_mob_spawner.validator import _check_respawn_seconds_well_formed
+        self.assertIsNone(_check_respawn_seconds_well_formed(
+            LoadedRule("p", self._rule(respawn_seconds=0)),
+        ))
+
+    def test_respawn_seconds_float_accepted(self):
+        from evennia_mob_spawner.validator import _check_respawn_seconds_well_formed
+        self.assertIsNone(_check_respawn_seconds_well_formed(
+            LoadedRule("p", self._rule(respawn_seconds=1.5)),
+        ))
+
+    # death_cooldown_seconds — share-validation contract is identical;
+    # one negative case is enough to confirm the predicate is wired.
+
+    def test_death_cooldown_seconds_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_death_cooldown_seconds_well_formed
+        finding = _check_death_cooldown_seconds_well_formed(
+            LoadedRule("p", self._rule(death_cooldown_seconds="60")),
+        )
+        self.assertIn("'death_cooldown_seconds' must be a number", finding)
+
+    def test_death_cooldown_seconds_negative_rejected(self):
+        from evennia_mob_spawner.validator import _check_death_cooldown_seconds_well_formed
+        finding = _check_death_cooldown_seconds_well_formed(
+            LoadedRule("p", self._rule(death_cooldown_seconds=-5)),
+        )
+        self.assertIn("must be non-negative", finding)
+
+
+class OptionalStringPredicatesTest(TestCase):
+    """Optional string fields: absent / wrong-type / empty cases."""
+
+    def _rule(self, **fields):
+        base = {k: v for k, v in _VALID_RULE.items()
+                if k not in ("desc", "post_spawn_hook",
+                             "spawn_with_typeclass", "den_room_tag")}
+        base.update(fields)
+        return base
+
+    # desc — empty IS allowed (override-to-empty semantic).
+
+    def test_desc_absent_passes(self):
+        from evennia_mob_spawner.validator import _check_desc_well_formed
+        self.assertIsNone(_check_desc_well_formed(LoadedRule("p", self._rule())))
+
+    def test_desc_empty_string_accepted(self):
+        from evennia_mob_spawner.validator import _check_desc_well_formed
+        self.assertIsNone(_check_desc_well_formed(
+            LoadedRule("p", self._rule(desc="")),
+        ))
+
+    def test_desc_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_desc_well_formed
+        finding = _check_desc_well_formed(LoadedRule("p", self._rule(desc=42)))
+        self.assertIn("'desc' must be a string", finding)
+
+    # post_spawn_hook — empty REJECTED.
+
+    def test_post_spawn_hook_absent_passes(self):
+        from evennia_mob_spawner.validator import _check_post_spawn_hook_well_formed
+        self.assertIsNone(_check_post_spawn_hook_well_formed(LoadedRule("p", self._rule())))
+
+    def test_post_spawn_hook_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_post_spawn_hook_well_formed
+        finding = _check_post_spawn_hook_well_formed(
+            LoadedRule("p", self._rule(post_spawn_hook=42)),
+        )
+        self.assertIn("'post_spawn_hook' must be a string", finding)
+
+    def test_post_spawn_hook_empty_rejected(self):
+        from evennia_mob_spawner.validator import _check_post_spawn_hook_well_formed
+        finding = _check_post_spawn_hook_well_formed(
+            LoadedRule("p", self._rule(post_spawn_hook="")),
+        )
+        self.assertIn("must be a non-empty string", finding)
+
+    # spawn_with_typeclass
+
+    def test_spawn_with_typeclass_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_spawn_with_typeclass_well_formed
+        finding = _check_spawn_with_typeclass_well_formed(
+            LoadedRule("p", self._rule(spawn_with_typeclass=[])),
+        )
+        self.assertIn("'spawn_with_typeclass' must be a string", finding)
+
+    def test_spawn_with_typeclass_empty_rejected(self):
+        from evennia_mob_spawner.validator import _check_spawn_with_typeclass_well_formed
+        finding = _check_spawn_with_typeclass_well_formed(
+            LoadedRule("p", self._rule(spawn_with_typeclass="   ")),
+        )
+        self.assertIn("must be a non-empty string", finding)
+
+    # den_room_tag
+
+    def test_den_room_tag_wrong_type(self):
+        from evennia_mob_spawner.validator import _check_den_room_tag_well_formed
+        finding = _check_den_room_tag_well_formed(
+            LoadedRule("p", self._rule(den_room_tag=None)),
+        )
+        self.assertIn("'den_room_tag' must be a string", finding)
+
+    def test_den_room_tag_empty_rejected(self):
+        from evennia_mob_spawner.validator import _check_den_room_tag_well_formed
+        finding = _check_den_room_tag_well_formed(
+            LoadedRule("p", self._rule(den_room_tag="")),
+        )
+        self.assertIn("must be a non-empty string", finding)
+
+
+class OptionalAttrsPredicateTest(TestCase):
+    """`attrs` must be a mapping if present."""
+
+    def _rule(self, **fields):
+        base = {k: v for k, v in _VALID_RULE.items() if k != "attrs"}
+        base.update(fields)
+        return base
+
+    def test_attrs_absent_passes(self):
+        from evennia_mob_spawner.validator import _check_attrs_well_formed
+        self.assertIsNone(_check_attrs_well_formed(LoadedRule("p", self._rule())))
+
+    def test_attrs_empty_dict_passes(self):
+        from evennia_mob_spawner.validator import _check_attrs_well_formed
+        self.assertIsNone(_check_attrs_well_formed(LoadedRule("p", self._rule(attrs={}))))
+
+    def test_attrs_list_rejected(self):
+        from evennia_mob_spawner.validator import _check_attrs_well_formed
+        finding = _check_attrs_well_formed(LoadedRule("p", self._rule(attrs=["x"])))
+        self.assertIn("'attrs' must be a mapping", finding)
+
+    def test_attrs_string_rejected(self):
+        from evennia_mob_spawner.validator import _check_attrs_well_formed
+        finding = _check_attrs_well_formed(LoadedRule("p", self._rule(attrs="x")))
+        self.assertIn("'attrs' must be a mapping", finding)
+
+
+class ValidatorPredicateIntegrationTest(TestCase):
+    """End-to-end through Validator.validate() exercising real predicates."""
+
+    def _make_validator(self):
+        return Validator(Definitions.from_dict({"levels": []}))
+
+    def test_valid_rule_passes_validate(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [_VALID_RULE]}))
+        self.assertEqual(v.errors, [])
+
+    def test_rule_missing_multiple_required_fields_accumulates_findings(self):
+        # Empty rule → all 6 required-field predicates flag (rule_id,
+        # typeclass, key, area_tag, target, max_per_room) plus
+        # cooldown_exclusivity ("neither declared"). 7 findings.
+        # rule_is_mapping passes because the rule IS a dict.
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [{}]}))
+        self.assertEqual(len(v.errors), 7)
+
+    def test_non_dict_rule_produces_one_clean_finding(self):
+        # The other 13 predicates short-circuit; only _check_rule_is_mapping
+        # fires. Operator sees one clear message, not 14.
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": ["not a dict"]}))
+        self.assertEqual(len(v.errors), 1)
+        self.assertIn("rule entries must be mappings", v.errors[0])
+
+
+class Tier2UniqueRuleIdTest(TestCase):
+    """Tier 2 — `rule_id` unique within each file."""
+
+    def _make_validator(self):
+        return Validator(Definitions.from_dict({"levels": []}))
+
+    def _rule(self, rule_id):
+        return {**_VALID_RULE, "rule_id": rule_id}
+
+    def test_unique_ids_within_file_pass(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={"a.yaml": [
+            self._rule(1), self._rule(2), self._rule(3),
+        ]}))
+        self.assertEqual(v.errors, [])
+
+    def test_duplicate_id_within_same_file_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(1), self._rule(1),
+            ]}))
+        self.assertEqual(len(v.errors), 1)
+        self.assertIn("duplicate rule_id 1", v.errors[0])
+
+    def test_same_id_across_different_files_passes(self):
+        # rule_id uniqueness is per-file, not global.
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={
+            "a.yaml": [self._rule(1)],
+            "b.yaml": [self._rule(1)],
+        }))
+        self.assertEqual(v.errors, [])
+
+    def test_three_copies_of_same_id_produce_two_findings(self):
+        # Each duplicate is its own finding — operator can see how many
+        # collisions there are at a glance.
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(5), self._rule(5), self._rule(5),
+            ]}))
+        self.assertEqual(len(v.errors), 2)
+
+    def test_tier_2_skipped_when_rule_fails_tier_1(self):
+        # Two rules both with rule_id=7, but the second is missing
+        # required fields. Tier 1 flags the missing fields → Tier 2 is
+        # skipped for the second rule → no duplicate-rule_id finding.
+        v = self._make_validator()
+        bad = {"rule_id": 7}  # missing everything else
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(7),  # passes Tier 1
+                bad,             # fails Tier 1 — skipped by Tier 2
+            ]}))
+        # All errors should be Tier 1 failures from `bad`; none should
+        # mention duplicate rule_id.
+        for err in v.errors:
+            self.assertNotIn("duplicate rule_id", err)
+
+    def test_seen_ids_populated_after_pass(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={
+            "a.yaml": [self._rule(1), self._rule(2)],
+            "b.yaml": [self._rule(1)],
+        }))
+        self.assertEqual(v.seen_ids, {
+            "a.yaml": {1, 2},
+            "b.yaml": {1},
+        })
+
+
+class FileMetadataShapeTest(TestCase):
+    """File-level shape pass — `_check_file_metadata_shape`."""
+
+    def _make_validator(self):
+        return Validator(Definitions.from_dict({"levels": []}))
+
+    def test_empty_file_metadata_passes(self):
+        v = self._make_validator()
+        v.validate(LoadResult(rule_sets={}, file_metadata={}))
+        self.assertEqual(v.errors, [])
+
+    def test_mapping_value_passes(self):
+        v = self._make_validator()
+        v.validate(LoadResult(
+            rule_sets={},
+            file_metadata={"a.yaml": {"display_name": "Test Zone"}},
+        ))
+        self.assertEqual(v.errors, [])
+
+    def test_non_mapping_value_rejected(self):
+        # The Loader never produces this, but defends LoadResult
+        # against direct construction with bad metadata.
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(
+                rule_sets={},
+                file_metadata={"a.yaml": "not a mapping"},
+            ))
+        self.assertEqual(len(v.errors), 1)
+        self.assertIn("file metadata must be a mapping", v.errors[0])
+        self.assertIn("got str", v.errors[0])
+
+    def test_multiple_bad_metadata_entries_all_flagged(self):
+        v = self._make_validator()
+        from evennia_mob_spawner.errors import ValidatorError
+        with self.assertRaises(ValidatorError):
+            v.validate(LoadResult(
+                rule_sets={},
+                file_metadata={
+                    "a.yaml": "scalar",
+                    "b.yaml": ["a", "list"],
+                },
+            ))
+        # Each malformed entry surfaces its own finding.
+        self.assertEqual(len(v.errors), 2)
 
 
 class CliScaffoldSmokeTest(TestCase):
