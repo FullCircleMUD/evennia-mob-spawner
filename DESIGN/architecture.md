@@ -1,6 +1,6 @@
 # Architecture
 
-High-level mapping of the spawn system's mechanisms and the library / consumer boundary for each. This is the architectural pass — captures decisions agreed in conversation before any code lands. As specific mechanisms are implemented, focused docs (`rule-schema.md`, `script-lifecycle.md`, …) will drill into them and supersede the relevant rows below.
+High-level mapping of the spawn system's mechanisms and the library / consumer boundary for each. The doc tracks alongside the implementation — every decision below is reflected in code, every behaviour in code is reflected here. If you find a gap, treat it as a bug in this doc.
 
 ## Guiding principle
 
@@ -48,7 +48,7 @@ repo-ci-pre-validation: true   # default: false
 ```
 
 - **`false`** (default): `ms_load` walks the whole repo and runs Tier 1+2 before any in-scope work. Safe; expensive at scale.
-- **`true`**: `ms_load` trusts the consumer's CI gate. Runs only Tier 3 on the in-scope files. Whole-repo Tier 1+2 is skipped on the assumption that CI has already enforced it on the YAML at merge time.
+- **`true`**: `ms_load` trusts the consumer's CI gate. Runs Tier 3 + Tier 4 on the in-scope files (these need the engine and can't run in CI). Whole-repo Tier 1+2 is skipped on the assumption that CI has already enforced it on the YAML at merge time.
 
 **Per-invocation override:** `ms_load <scope> --force-validate` runs whole-repo Tier 1+2 regardless of the flag. Same semantics as `wb_build --force-validate`.
 
@@ -109,7 +109,7 @@ Each script ticks every `MOB_SPAWNER_TICK_SECONDS` (library-level setting, singl
 3. **Cooldown check** — if the rule uses `respawn_seconds` or `death_cooldown_seconds`, compare against `last_spawn_time` or `last_death_time` respectively. Skip if the cooldown hasn't elapsed.
 4. **Population check** — skip if the rule is already at `target`.
 5. **Room selection** — pick an eligible room (see [Room selection](#room-selection-three-tier-fallback)).
-6. **Spawn** — `create_object(typeclass=..., location=..., ...)`. Apply rule-declared tags. Re-tag with the rule's `area_tag`. Invoke `post_spawn_hook` if declared.
+6. **Spawn** — `create_object(typeclass=..., location=..., ...)`. Re-tag with the rule's `area_tag` under the configured category. Apply `desc` override + `attrs` overrides. Invoke `mob.ms_at_post_spawn()` if the typeclass defines it (decision #23).
 7. **Save state** — `last_observed_count = current_count`, `spawned_last_tick = spawned_this_tick`, `last_spawn_time = now` (if spawned).
 
 Step 1 happens *before* the spawn decision, so each tick's observation reflects the world as left by previous ticks — without double-counting this tick's own spawn.
@@ -142,12 +142,11 @@ A rule sets one or the other, not both.
 
 ### Tags applied at spawn time
 
-On every spawn the library stamps the new mob with:
+On every spawn the library stamps the new mob with the rule's `area_tag` under the configured category (decision #2). This is the only tag the library applies. Useful by default: the consumer's AI / wander logic can read the same tag to constrain movement, and the tick loop's population counting depends on it.
 
-- The same `area_tag` it queried (library re-tags the mob with the rule's `area_tag` in the configured category). Useful by default: the consumer's AI / wander logic can read the same tag to constrain movement.
-- Any additional tags the rule declares — the library applies them generically without interpreting their meaning. Consumer-defined loot tags (e.g. FCM's `spawn_resources`, `spawn_gold`, `spawn_scrolls`, `spawn_recipes`) ride this generic mechanism.
+**No additional tags applied by the library.** The v0 rule schema has no generic `tags:` field for the library to interpret. Consumers who need per-spawn tagging beyond `area_tag` (e.g. FCM's `spawn_resources` / `spawn_gold` / `spawn_scrolls` / `spawn_recipes` loot-category markers) implement that in their typeclass's `at_object_creation` or in `ms_at_post_spawn()` — those are consumer concerns, not library concerns (decision #2 + principle 2).
 
-**No breadcrumb attributes pointing back at the library.** The library doesn't need them; it observes the world rather than receiving notifications.
+**No breadcrumb attributes pointing back at the library.** The library doesn't need them; it observes the world rather than receiving notifications (decision #5).
 
 ### Death detection (observation, not notification)
 
@@ -192,13 +191,15 @@ Race protection between `ms_load` and an in-flight tick. For each rule-set file 
 3. **Graceful stop** — `script.stop_when_safe(timeout=60s)`. The script's tick loop checks a stop flag at safe points (between rule iterations within a tick) and acknowledges once in a consistent stopped state.
 4. **Force stop on timeout** — if no ack within the timeout, `script.force_stop()`. Internal-only; not an operator command. State already snapshotted in step 2.
 5. **Swap** — replace `db.spawn_table` with the new rules. Purge bookkeeping entries for removed rules. Restore the snapshot for rules that still exist.
-6. **Resume** — `script.start()`.
+6. **Resume** — `script.unpause()` if the script was running before the drain (the drain pauses it). A script that was already paused / stopped at deploy time is NOT resumed — the operator's explicit stop isn't second-guessed.
 
 `ms_load` runs async (`run_async` / `deferToThread`, matching `wb_build`) so the reactor stays responsive while workers wait for stop acks. Each script transitions independently.
 
 ### at_server_start integration
 
-The library exposes a helper (name [TBD]) the consumer calls from `server/conf/at_server_startstop.py`. The helper takes a scope query and performs the upsert (same logic as `ms_load`). On cold start it creates missing scripts; on warm restart it finds existing scripts (whose state survived via Evennia's script persistence) and updates rules in place.
+**Status: pending implementation.** Operators currently run `ms_load <scope>` interactively after server start. The convenience helper described below is the planned shape.
+
+When shipped, the library will expose a helper (name [TBD]) the consumer calls from `server/conf/at_server_startstop.py`. The helper takes a scope query and performs the upsert (same logic as `ms_load`). On cold start it creates missing scripts; on warm restart it finds existing scripts (whose state survived via Evennia's script persistence) and updates rules in place.
 
 **Consumer-driven, not library-driven.** Each shard's bootstrap knows which rule-set files belong to it; the library doesn't need to know about shards or routers.
 
@@ -217,10 +218,10 @@ The library exposes a helper (name [TBD]) the consumer calls from `server/conf/a
 | Room selection (3-tier fallback) | ✓ | |
 | Tick loop, cooldown bookkeeping, death detection | ✓ | |
 | Re-tag spawned mob with rule's `area_tag` | ✓ | |
-| Apply additional rule-declared tags | applies generically | declares which tags in YAML |
-| post_spawn_hook invocation | invokes | writes the function |
+| Additional per-spawn tagging (loot categories, etc.) | | ✓ via typeclass `at_object_creation` or `ms_at_post_spawn` |
+| `ms_at_post_spawn()` invocation | invokes if present (duck-typed) | writes the method on the typeclass (optional) |
 | Typeclass behaviour (AI, combat, loot, death) | | ✓ |
-| `at_server_start` wiring | provides helper | calls helper with shard's scope |
+| `at_server_start` wiring | provides helper *[name TBD]* | calls helper with shard's scope |
 | Tags ON the rooms | | placed by whatever puts them there (FCM uses `evennia-world-builder`) |
 
 ## Agreed decisions
@@ -245,7 +246,7 @@ The library exposes a helper (name [TBD]) the consumer calls from `server/conf/a
 18. **`ms_restart` is a first-class operator command.** Kicks the ticker on an existing script without re-reading YAML; preserves state. Recovery action for stuck / stopped scripts; works when YAML is unavailable (Reader fetch failed). Sits between `ms_status` and `ms_load` on the escalation ladder. Composition of `script.stop_when_safe()` + `script.start()` — both primitives already needed for `ms_stop` and `ms_load`.
 19. **Validation gating mirrors world-builder.** Three predicate tiers (shape / per-file uniqueness / engine-resolvability). No cross-rule-references tier — mob-spawner has no cross-rule references. (A non-refusing Tier 4 *diagnostics* layer was added later — see decision #24.) `repo-ci-pre-validation` flag in `definitions.yaml` (same name as world-builder) lets a consumer skip whole-repo Tier 1+2 in `ms_load` when CI has already gated the YAML. `ms_load --force-validate` overrides per-invocation. Standalone **`ms-validate`** CLI runs Tier 1+2 without Evennia for local iteration / pre-commit / CI. See [Validation tiering and gating](#validation-tiering-and-gating).
 20. **Loader uses world-builder's `file_metadata` pattern.** Each leaf rule-set file is a top-level mapping with one canonical list-bearing key (`rules:`); any other top-level keys are bagged into `LoadResult.file_metadata[path]` as `{key: value}` for downstream stages to look up. The library doesn't curate which keys exist — none are recognised today, the slot exists so per-file directives can land later without a schema break. Mirrors `evennia-world-builder`'s `entities:` + `incoming_exits:` / `links:` shape so authors see the same file-shape conventions across both libraries; a file appears in `file_metadata` only if it declared at least one non-`rules:` key (clean-by-default).
-21. **Mandatory-vs-optional follows the consumer baseline.** The schema's required-field set is calibrated against the existing FCM `world/spawns/*.json` corpus (87 rules across 10 zones). Fields that 100% of authored rules set are mandatory in the library (`typeclass`, `key`, `area_tag`, `target`, `max_per_room`, plus exactly one of the cooldown pair). Fields that the consumer uses optionally are optional here (`desc`, `attrs`, `post_spawn_hook`, `spawn_with_typeclass`, `den_room_tag`). Cooldown pair is mandatory **as a pair** but mutually exclusive — empirically every consumer rule declares exactly one, never both, never neither, so the contract resolves the earlier "one or the other" ambiguity to **exactly one of**. The library's `rule_id` is the lone exception: it's mandatory here but doesn't appear in the consumer baseline (the consumer used `f"{typeclass}:{area_tag}"` as bookkeeping handle; decision #10 replaced that with author-supplied integer IDs).
+21. **Mandatory-vs-optional follows the consumer baseline.** The schema's required-field set is calibrated against the existing FCM `world/spawns/*.json` corpus (87 rules across 10 zones). Fields that 100% of authored rules set are mandatory in the library (`typeclass`, `key`, `area_tag`, `target`, `max_per_room`, plus exactly one of the cooldown pair). Fields that the consumer uses optionally are optional here (`desc`, `attrs`, `spawn_with_typeclass`, `den_room_tag`). Cooldown pair is mandatory **as a pair** but mutually exclusive — empirically every consumer rule declares exactly one, never both, never neither, so the contract resolves the earlier "one or the other" ambiguity to **exactly one of**. Two schema departures from the consumer baseline rather than direct ports: `rule_id` is library-mandatory but doesn't appear in the consumer baseline (the consumer used `f"{typeclass}:{area_tag}"` as bookkeeping handle; decision #10 replaced that with author-supplied integer IDs); and the consumer's `post_spawn_hook: <dotted_path>` YAML field is NOT carried into the library — replaced by the `ms_at_post_spawn()` method-on-typeclass protocol (decision #23).
 22. **Room-selection patterns layer within a single rule; not mutually exclusive.** `spawn_with_typeclass`, `den_room_tag`, and the implicit random-area default can all coexist in one rule. The room-selection algorithm walks them in fixed order (pack → den → random) and uses the first that yields an eligible room. Mixing patterns is the explicit way to author meaningful choreography (e.g. "spawn next to the boss, but fall back to the den if the boss is dead, then to random within the area"). The validator does NOT refuse rules that set multiple patterns — the algorithm's natural fallthrough is the intended semantic. The architecture text's earlier "three patterns, in order of specificity" phrasing was clarified here to make the layering explicit.
 23. **Per-spawn behaviour is a typeclass method, not a YAML field.** The library invokes `mob.ms_at_post_spawn()` if the spawned typeclass defines that method; absent, nothing happens. Duck-typed protocol: one optional method name, no inheritance demands, no required base class. This is a deliberate departure from the consumer baseline's `post_spawn_hook: <dotted_path>` YAML field — the existing FCM pattern wasn't designed with loose coupling in mind, and "scattered hook functions across shared modules" becomes hard to track as authoring scales. Per-rule customization of a shared typeclass is now expressed via subclassing (different behaviour → different typeclass), the OO-correct pattern. **The `ms_` prefix marks library provenance; the `at_` element follows Evennia's `at_object_creation`/`at_post_move`/etc. convention.** Tier 3 validates: if the resolved typeclass declares `ms_at_post_spawn`, it must be callable AND callable as `mob.ms_at_post_spawn()` (zero required args after `self` — catches `def ms_at_post_spawn(self, foo):` typos at validation time, not runtime). This is a measured exception to decision #3's "declares no protocol" stance: the protocol is optional, narrow (one method name), and the locality benefit (post-spawn behaviour lives with the typeclass code) is real and outweighs the tiny protocol-surface cost.
 24. **Tag-existence is a Tier 4 deploy-time diagnostic, not a validation refusal.** Validator passes rules whose `area_tag` / `den_room_tag` reference tags with zero matching rooms — the operator may be deploying world content in parallel; refusing would break that workflow. A separate `EVENNIA_DIAGNOSTICS` tuple on the Validator holds side-effecting `_diagnostic_*` functions with signature `(LoadedRule) -> None`. They run only with `evennia_runtime=True`, only on rules that survived Tier 1, and emit a single WARN log per missing-tag rule (so the operator sees the issue once at deploy time instead of 240+ times/hour at tick time). Tick-time logging (decision #15) remains as the runtime fallback for tags that go missing post-deploy. Tier 4's contract is deliberately distinct from predicates: side effects allowed, no return value to inspect, no findings collected — naming convention `_diagnostic_*` (vs predicates' `_check_*`) marks the difference at every call site. The tag-category queried is `MOB_SPAWNER_AREA_TAG_CATEGORY` (defaulting to `"mob_area"` per decision #1).

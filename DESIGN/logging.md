@@ -54,7 +54,7 @@ When the library is imported outside a running Evennia engine — tests, future 
 
 The shim is in place independently of which sites call it. Wiring decisions are tracked in [progress.md](progress.md) as they ship. Candidate sites identified during design discussion:
 
-- **Spawn-time errors** (decision #14) — when `create_object` or a `post_spawn_hook` raises, the surrounding `try / except` logs the error with rule context. The tick continues; one bad rule doesn't take down the script.
+- **Spawn-time errors** (decision #14) — when `create_object` or a typeclass's `ms_at_post_spawn()` raises, the surrounding `try / except` logs the error with rule context. The tick continues; one bad rule doesn't take down the script.
 - **Empty `area_tag` queries** (decision #15) — pre-spawn check finds zero rooms matching the rule's `area_tag`. Logged once per occurrence with rule context. Useful for operator-side "why isn't this zone spawning?" debugging.
 - **Script lifecycle events** — load, restart, stop, delete. Includes drain timeouts (graceful stop didn't ack within 60s → force-stop fired) and any state-snapshot / state-restore events around the swap.
 - **Validator refusals** — every finding emitted when `ms_load` refuses to apply a malformed rule-set file. An authoring-mistake audit trail.
