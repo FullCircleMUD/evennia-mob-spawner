@@ -1829,6 +1829,209 @@ class TickLoopTest(TestCase):
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
 
 
+class RaceProtocolTest(TestCase):
+    """Decision #13's race-safe drain: stop_when_safe + force_stop.
+
+    The tick loop checks ``ndb._stop_requested`` between rules and
+    sets ``ndb._tick_in_progress`` for the duration of a tick.
+    These tests exercise the flag plumbing directly — true
+    mid-tick interruption requires concurrency that's awkward to
+    test deterministically, so we cover the synchronous side: flag
+    set BEFORE the tick blocks the tick; flag clearing on a
+    successful drain; force_stop pauses regardless of flag state.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, rule_id=1):
+        return {
+            "rule_id": rule_id,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+
+    def _script_with_rule(self):
+        return _TickLoopFixture.deploy_rule(self._rule())
+
+    # at_repeat's flag handling -----------------------------------------
+
+    def test_tick_sets_and_clears_tick_in_progress(self):
+        # Sanity: ``_tick_in_progress`` is False before, True during
+        # (we can't observe the True easily without concurrency), and
+        # False after. The pre/post check is sufficient — if the
+        # finally-block didn't fire, the flag would leak across ticks.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        self.assertFalse(bool(script.ndb._tick_in_progress))
+        script.at_repeat()
+        self.assertFalse(bool(script.ndb._tick_in_progress))
+
+    def test_tick_exits_early_when_stop_requested_at_start(self):
+        # Set the stop flag before calling at_repeat. The tick should
+        # exit immediately without spawning anything. Deliberately no
+        # room created — the stop check fires BEFORE the rule loop
+        # would have queried for a room.
+        script = self._script_with_rule()
+        script.ndb._stop_requested = True
+        script.at_repeat()
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
+        # No state updates either (we never entered the rule loop).
+        self.assertEqual(script.db.last_spawn_times or {}, {})
+
+    def test_tick_exits_early_between_rules_when_stop_requested(self):
+        # Two rules in the table. Manually inject a stop request that
+        # fires for the second rule. Use a wrapped at_repeat that sets
+        # the flag mid-pass by patching _tick_one_rule to set the flag
+        # after processing rule 1.
+        _TickLoopFixture.make_room("Test Room 1")
+        _TickLoopFixture.make_room("Test Room 2")
+
+        rule_1 = self._rule(rule_id=1)
+        rule_2 = self._rule(rule_id=2)
+        from evennia_mob_spawner.deployer import Deployer
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(
+            rule_sets={"twin.yaml": [rule_1, rule_2]},
+        ))
+
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="twin.yaml").first()
+
+        # Wrap _tick_one_rule so that processing rule 1 sets the stop
+        # flag — rule 2's iteration should then bail at the start-of-
+        # iteration check, with no spawn.
+        original = script._tick_one_rule
+
+        def patched(rule, *args, **kwargs):
+            original(rule, *args, **kwargs)
+            if rule["rule_id"] == 1:
+                script.ndb._stop_requested = True
+
+        script._tick_one_rule = patched
+        try:
+            script.at_repeat()
+        finally:
+            script._tick_one_rule = original
+
+        # Exactly one mob should have spawned (rule 1 only).
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    # stop_when_safe semantics ------------------------------------------
+
+    def test_stop_when_safe_returns_true_for_idle_script(self):
+        # No tick in flight, script just sitting there → drains
+        # trivially and pauses.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        drained = script.stop_when_safe(timeout=1.0)
+        self.assertTrue(drained)
+        # Script should now be paused.
+        self.assertTrue(bool(script.db._paused_time))
+
+    def test_stop_when_safe_returns_true_for_already_paused_script(self):
+        # Already paused → return True without touching state.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        script.pause()
+        # _stop_requested should be untouched by a no-op stop_when_safe.
+        self.assertFalse(bool(script.ndb._stop_requested))
+        drained = script.stop_when_safe(timeout=0.5)
+        self.assertTrue(drained)
+        self.assertFalse(bool(script.ndb._stop_requested))
+
+    def test_stop_when_safe_clears_stop_flag_on_success(self):
+        # After a successful drain the flag is False so the next tick
+        # (after unpause) proceeds normally.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        script.stop_when_safe(timeout=1.0)
+        self.assertFalse(bool(script.ndb._stop_requested))
+
+    # force_stop semantics ----------------------------------------------
+
+    def test_force_stop_pauses_active_script(self):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        # Sanity: script starts active.
+        self.assertTrue(script.is_active)
+        self.assertFalse(bool(script.db._paused_time))
+        script.force_stop()
+        self.assertTrue(bool(script.db._paused_time))
+
+    def test_force_stop_sets_stop_flag(self):
+        # force_stop also signals the stop flag — a wedged in-flight
+        # tick that DOES eventually reach its between-rules check will
+        # exit. Deployer is responsible for clearing the flag after
+        # the swap; force_stop itself doesn't.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        script.force_stop()
+        self.assertTrue(bool(script.ndb._stop_requested))
+
+    def test_force_stop_idempotent_on_already_paused_script(self):
+        # Calling force_stop on a paused script shouldn't unpause it
+        # or cause any error.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = self._script_with_rule()
+        script.pause()
+        script.force_stop()
+        self.assertTrue(bool(script.db._paused_time))
+
+    # Deployer integration ----------------------------------------------
+
+    def test_deployer_resumes_running_script_after_swap(self):
+        # Deploy once (script created + running). Deploy again — the
+        # script should still be running afterward.
+        _TickLoopFixture.make_room("Test Room 1")
+        from evennia_mob_spawner.deployer import Deployer
+        defs = Definitions.from_dict({"levels": []})
+        deployer = Deployer(defs)
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        self.assertTrue(script.is_active)
+        self.assertFalse(bool(script.db._paused_time))
+
+        # Re-deploy — should drain via stop_when_safe (which succeeds
+        # trivially since no tick is in flight) and unpause at the end.
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
+
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        self.assertTrue(script.is_active)
+        self.assertFalse(bool(script.db._paused_time))
+        # Stop flag should have been cleared by the Deployer's finally.
+        self.assertFalse(bool(script.ndb._stop_requested))
+
+    def test_deployer_does_not_resume_paused_script(self):
+        # If a script was paused before re-deploy, it should remain
+        # paused afterward (the user explicitly stopped it; don't
+        # second-guess).
+        _TickLoopFixture.make_room("Test Room 1")
+        from evennia_mob_spawner.deployer import Deployer
+        defs = Definitions.from_dict({"levels": []})
+        deployer = Deployer(defs)
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
+        from evennia_mob_spawner.script import MobSpawnerScript
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        script.pause()
+        self.assertTrue(bool(script.db._paused_time))
+
+        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
+
+        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
+        # Should still be paused.
+        self.assertTrue(bool(script.db._paused_time))
+
+
 class CliScaffoldSmokeTest(TestCase):
     """ms-validate CLI module is importable; parser builds; validate() runs."""
 

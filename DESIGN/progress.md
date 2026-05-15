@@ -2,7 +2,38 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
-## 2026-05-15 (mid-day — latest)
+## 2026-05-15 (afternoon — latest)
+
+**Pass C landed — race protocol primitives. `MobSpawnerScript.stop_when_safe` / `force_stop` + Deployer drain-before-swap (decision #13). The library is functionally complete against architecture v0.**
+
+Implementation:
+
+- **[script.py](../src/evennia_mob_spawner/script.py)** — added race-protocol cooperation:
+  - `at_repeat` checks `ndb._stop_requested` at two points: pre-loop (returns immediately) and **between rules** (breaks out cleanly, partial state written back). Mid-rule interruption is not supported — half-applied state, partial spawn, etc. The between-rules check is the safe granularity.
+  - `at_repeat` sets `ndb._tick_in_progress = True` for the duration of a tick (in a `try/finally` so it always clears).
+  - **`stop_when_safe(timeout=60.0)`** primitive: sets `_stop_requested`, polls `_tick_in_progress` (100ms granularity) until the in-flight tick exits, then pauses. Returns True on clean drain, False on timeout. No-op on already-paused / already-stopped scripts (returns True immediately).
+  - **`force_stop()`** primitive (internal-only per decision #13): sets `_stop_requested` and pauses. Doesn't actually halt a wedged tick — CPython can't interrupt a running function from another thread cleanly. A truly stuck tick runs to whatever conclusion it reaches; the swap proceeds anyway and the next un-pause restarts on the new rule table.
+- **[deployer.py](../src/evennia_mob_spawner/deployer.py)** — switched from naive `pause()` / `unpause()` to the race-safe protocol:
+  - `was_running = is_active and not _paused_time` discriminator (correctly reads paused vs running, fixing the same `is_active` pitfall that bit `ms_status` earlier).
+  - Drains via `stop_when_safe(60)` only when the script was actually running.
+  - On timeout, logs a WARN and falls back to `force_stop()`.
+  - `_stop_requested` flag is unconditionally cleared in the `finally` block after the swap, so the next tick proceeds normally regardless of which stop path fired.
+  - Behaviour change: a previously-paused or stopped script stays in its prior state after re-deploy. The operator's explicit stop isn't second-guessed.
+- **11 new RaceProtocolTest cases** cover:
+  - Tick clears `_tick_in_progress` after running (try/finally discipline).
+  - `_stop_requested = True` before tick → tick exits immediately, no state writes.
+  - Stop flag set mid-loop (via patched `_tick_one_rule`) → second rule skipped.
+  - `stop_when_safe` returns True quickly for idle / paused scripts (no-op).
+  - `stop_when_safe` clears the stop flag on success (so post-resume ticks work).
+  - `force_stop` pauses an active script + sets the stop flag.
+  - `force_stop` is idempotent on an already-paused script.
+  - Deployer integration: re-deploy of a running script keeps it running; re-deploy of a paused script keeps it paused.
+
+**164 tests green** (was 153, +11).
+
+**The library is functionally complete against architecture v0.** The MVP runs end-to-end: YAML → validate → upsert → tick → spawn → death-detect → cooldown → respawn, with race-safe re-deployment under a live tick. One open question remains in architecture.md (the `at_server_start` consumer helper name, deferred until first integration with a real consumer hook lifecycle).
+
+## 2026-05-15 (mid-day)
 
 **Pass B landed — the tick loop is real. `MobSpawnerScript.at_repeat` implements the full observe / detect-deaths / cooldown-gate / population-gate / room-pick / spawn / save-state sequence per architecture.md "The tick loop". Library now actually spawns mobs.**
 

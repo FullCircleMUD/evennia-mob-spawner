@@ -128,34 +128,71 @@ class MobSpawnerScript(_BASE_SCRIPT):
         if not spawn_table:
             return
 
-        now = time.time()
-        prior_observed = dict(self.db.last_observed_counts or {})
-        prior_spawned = dict(self.db.spawned_last_tick or {})
-        last_spawn_times = dict(self.db.last_spawn_times or {})
-        last_death_times = dict(self.db.last_death_times or {})
+        # Race-protocol cooperation (decision #13): if a graceful stop
+        # has been requested between ticks (e.g. by the Deployer about
+        # to swap our rule table), don't start a new pass at all. The
+        # ndb flag is cleared by ``stop_when_safe`` after the
+        # ``_tick_in_progress`` signal is observed False, OR by the
+        # Deployer once the swap is complete.
+        if self.ndb._stop_requested:
+            return
 
-        new_observed: dict[int, int] = {}
-        new_spawned: dict[int, int] = {}
+        # In-flight signal for ``stop_when_safe``: True while we're
+        # iterating the rule list, False once we return.
+        self.ndb._tick_in_progress = True
+        try:
+            now = time.time()
+            prior_observed = dict(self.db.last_observed_counts or {})
+            prior_spawned = dict(self.db.spawned_last_tick or {})
+            last_spawn_times = dict(self.db.last_spawn_times or {})
+            last_death_times = dict(self.db.last_death_times or {})
 
-        for rule in spawn_table:
-            try:
-                self._tick_one_rule(
-                    rule, now, prior_observed, prior_spawned,
-                    last_spawn_times, last_death_times,
-                    new_observed, new_spawned,
-                )
-            except Exception as e:
-                # Decision #14: one bad rule doesn't take down the tick.
+            new_observed: dict[int, int] = {}
+            new_spawned: dict[int, int] = {}
+
+            stopped_early = False
+            for rule in spawn_table:
+                # Check the stop flag at the safe point between rules
+                # (decision #13: "checks a stop flag at safe points
+                # within a tick"). Mid-rule interruption isn't safe —
+                # half-applied state, partial spawn, etc. — but
+                # between-rule exits leave a clean partial state.
+                if self.ndb._stop_requested:
+                    stopped_early = True
+                    break
+
+                try:
+                    self._tick_one_rule(
+                        rule, now, prior_observed, prior_spawned,
+                        last_spawn_times, last_death_times,
+                        new_observed, new_spawned,
+                    )
+                except Exception as e:
+                    # Decision #14: one bad rule doesn't take down the tick.
+                    ms_log(
+                        f"tick error for rule_id={rule.get('rule_id')!r} "
+                        f"in {self.db_key!r}: {e}",
+                        level="ERROR",
+                    )
+
+            if stopped_early:
                 ms_log(
-                    f"tick error for rule_id={rule.get('rule_id')!r} "
-                    f"in {self.db_key!r}: {e}",
-                    level="ERROR",
+                    f"{self.db_key}: tick exited mid-loop on stop request"
                 )
 
-        self.db.last_observed_counts = new_observed
-        self.db.spawned_last_tick = new_spawned
-        self.db.last_spawn_times = last_spawn_times
-        self.db.last_death_times = last_death_times
+            # Partial state is fine: rules we processed got their
+            # observation / cooldown / spawn updates; rules we didn't
+            # are simply absent from new_observed / new_spawned (their
+            # old values aren't carried forward, which means they'll be
+            # treated as "first tick" on next pass — that's harmless
+            # under the death-detection formula since deaths come out
+            # non-positive when the prior count is missing).
+            self.db.last_observed_counts = new_observed
+            self.db.spawned_last_tick = new_spawned
+            self.db.last_spawn_times = last_spawn_times
+            self.db.last_death_times = last_death_times
+        finally:
+            self.ndb._tick_in_progress = False
 
     def _tick_one_rule(
         self,
@@ -397,3 +434,77 @@ class MobSpawnerScript(_BASE_SCRIPT):
                 )
 
         return mob
+
+    # ------------------------------------------------------------------
+    # Race protocol primitives (decision #13)
+    # ------------------------------------------------------------------
+
+    def stop_when_safe(self, timeout: float = 60.0) -> bool:
+        """Request a graceful stop. Wait up to ``timeout`` seconds for drain.
+
+        The ``Deployer`` calls this before swapping ``db.spawn_table``
+        so an in-flight tick doesn't see a half-mutated rule list. Sets
+        ``ndb._stop_requested`` which the tick loop checks at the safe
+        point between rules. Polls ``ndb._tick_in_progress`` until the
+        tick exits, then pauses the script so no NEW ticks fire.
+
+        Returns:
+            True  — clean stop: any in-flight tick has drained and the
+                    script is now paused.
+            False — timeout: the in-flight tick did not acknowledge
+                    within ``timeout`` seconds. Caller should fall
+                    back to ``force_stop``.
+
+        No-op semantics when the script isn't actively ticking:
+        already-paused / already-stopped / never-started scripts
+        return True immediately without setting any flags.
+        """
+        # If the script isn't ticking, nothing to drain. Don't touch
+        # the stop flag (so a paused script's next un-pause resumes
+        # cleanly).
+        if not self.is_active or self.db._paused_time:
+            return True
+
+        self.ndb._stop_requested = True
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not self.ndb._tick_in_progress:
+                # Either no tick was running, or the in-flight tick
+                # observed the flag and exited. Pause now to prevent
+                # any further ticks from firing during the swap.
+                if not self.db._paused_time:
+                    self.pause()
+                # Clear the flag — by the time the script next ticks
+                # (after the Deployer unpauses), the swap is complete
+                # and we want normal operation.
+                self.ndb._stop_requested = False
+                return True
+            time.sleep(0.1)
+
+        # Drain timed out. Caller should force_stop. Don't clear the
+        # flag — force_stop relies on it being set so any tick that's
+        # still running will exit at its next between-rules check.
+        return False
+
+    def force_stop(self) -> None:
+        """Hard-stop: pause regardless of in-flight tick state.
+
+        Internal-only — not exposed as an operator command (decision
+        #13). Called by the ``Deployer`` when ``stop_when_safe`` times
+        out, on the theory that proceeding with the swap is preferable
+        to indefinitely blocking the Deployer.
+
+        Note that CPython has no clean way to interrupt a running
+        Python function from another thread. ``force_stop`` cannot
+        actually halt a wedged tick — it sets the stop flag (so the
+        tick will exit at its next between-rules check, IF it gets
+        there) and pauses the script (so NEW ticks don't fire). A
+        truly stuck tick (e.g. blocked on a DB query) will run to
+        whatever conclusion it reaches; the swap proceeds in parallel,
+        and the next scheduled tick (after the Deployer un-pauses)
+        sees the swapped state.
+        """
+        self.ndb._stop_requested = True
+        if self.is_active and not self.db._paused_time:
+            self.pause()

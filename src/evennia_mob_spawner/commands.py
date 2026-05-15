@@ -364,11 +364,11 @@ class CmdMsLoad(BaseCommand):
             f"{n_rules} rule{'' if n_rules == 1 else 's'})"
         )
 
-        # Deploy stage. Pass A landed: scripts are upserted with state
-        # preservation, but the tick loop inside each MobSpawnerScript
-        # is currently a no-op stub. The deploy itself will complete
-        # successfully; no mobs will actually spawn until Pass B (the
-        # tick loop) lands.
+        # Deploy stage: race-safe upsert. The Deployer drains any
+        # in-flight tick (decision #13's stop_when_safe + force_stop
+        # protocol), swaps db.spawn_table, and resumes the ticker —
+        # all per-file, preserving cooldown/observation state for
+        # rules that survive the swap.
         messages.append("ms_load: starting deployment")
         ms_log(f"ms_load: validation complete ({n_files} files, {n_rules} rules)")
 
@@ -383,23 +383,12 @@ class CmdMsLoad(BaseCommand):
 
         messages.append(
             f"ms_load: deployment complete "
-            f"({n_files} script{'' if n_files == 1 else 's'} upserted)"
-        )
-        # Tell the operator exactly where we're up to in the
-        # implementation. The scripts exist, hold their rule tables, and
-        # have their bookkeeping preserved across re-deploys — but the
-        # tick loop is a stub and no spawning happens yet.
-        messages.append("")
-        messages.append(
-            "ms_load: NOTE — the spawn tick loop is not yet implemented "
-            "(Pass A landed: lifecycle + state-preservation; Pass B will "
-            "add the observe/cooldown/spawn cycle in MobSpawnerScript.at_repeat). "
-            "Scripts are running on their tick interval but their at_repeat "
-            "is currently a no-op."
+            f"({n_files} script{'' if n_files == 1 else 's'} upserted, "
+            f"{n_rules} rule{'' if n_rules == 1 else 's'} active)"
         )
         ms_log(
             f"ms_load: deploy complete "
-            f"({n_files} scripts upserted, tick loop is a no-op stub)"
+            f"({n_files} scripts upserted, {n_rules} rules total)"
         )
         return messages
 
