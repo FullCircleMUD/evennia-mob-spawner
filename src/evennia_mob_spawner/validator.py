@@ -161,9 +161,14 @@ def _check_typeclass_well_formed(loaded: LoadedRule) -> str | None:
 def _check_key_well_formed(loaded: LoadedRule) -> str | None:
     """Required: ``key`` is a non-empty string.
 
-    The spawned mob's display name. Same `key` across rules is
-    permitted (the "indistinguishable variant" pattern — see
-    architecture.md decision #9); uniqueness is not enforced.
+    The spawned mob's display name. Same ``key`` across rules is
+    permitted — the "indistinguishable variant" pattern (architecture
+    decision #9), where multiple rules produce mobs that look identical
+    to the player but differ in loot, mechanics, or population targets.
+    Population counting discriminates on (file, rule_id) via identity
+    tags stamped at spawn, so rules can also share ``typeclass`` and
+    ``area_tag`` without colliding. Uniqueness of ``key`` is not
+    enforced.
     """
     rule = _rule_or_none(loaded)
     if rule is None:

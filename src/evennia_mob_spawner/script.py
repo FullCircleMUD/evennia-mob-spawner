@@ -30,7 +30,8 @@ Persistent state (architecture.md "The tick loop"):
 
 The tick loop:
     For each rule, on each tick:
-      1. Observe — count living mobs matching typeclass + area_tag.
+      1. Observe — count living mobs produced by this rule, keyed on
+         the (file, rule_id) identity tags stamped at spawn time.
       2. Detect deaths — `deaths = (last_observed + spawned_last_tick) - current`
          (decision #5: observation, not callback). Stamp `last_death_time`
          if positive.
@@ -281,20 +282,30 @@ class MobSpawnerScript(_BASE_SCRIPT):
     # Tick helpers — observation, cooldown, room selection, spawn
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _count_living(rule: dict) -> int:
-        """Count living mobs matching ``typeclass`` + ``area_tag``.
+    def _count_living(self, rule: dict) -> int:
+        """Count living mobs produced by this rule.
 
-        Exact typeclass match per decision #9 — enables the
-        indistinguishable-variant pattern. Mobs with ``db_location is
-        None`` (orphan, mid-delete) are excluded.
+        Population identity is keyed on (file, rule_id) — the two identity
+        tags stamped on every spawn by ``_spawn_one``. Discriminating on
+        rule_id rather than typeclass means two rules sharing the same
+        typeclass (e.g. loot variants of the same mob) are counted as
+        independent populations.
+
+        Two chained ``.filter`` calls produce two separate JOINs against
+        the tag table — needed because a single ``.filter`` with both
+        tag conditions would look for one row satisfying both, which the
+        many-to-many tag table cannot provide.
+
+        Mobs with ``db_location is None`` (orphan, mid-delete) are excluded.
         """
         from evennia.objects.models import ObjectDB
 
         return ObjectDB.objects.filter(
-            db_typeclass_path=rule["typeclass"],
-            db_tags__db_key=rule["area_tag"],
-            db_tags__db_category=get_area_tag_category(),
+            db_tags__db_key=str(rule["rule_id"]),
+            db_tags__db_category=_RULE_TAG_CATEGORY,
+        ).filter(
+            db_tags__db_key=self.db_key,
+            db_tags__db_category=_FILE_TAG_CATEGORY,
         ).exclude(db_location__isnull=True).count()
 
     @staticmethod

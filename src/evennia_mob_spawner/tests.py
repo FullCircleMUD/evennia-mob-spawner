@@ -2214,3 +2214,133 @@ class SpawnIdentityTagTest(EvenniaWorldTestCase):
             mob_b.tags.get(category="mob_spawner_rule", return_list=True),
             ["2"],
         )
+
+
+class CountLivingContractTest(EvenniaWorldTestCase):
+    """``_count_living`` keys on (file, rule_id), not (typeclass, area_tag).
+
+    The contract change enables shared-typeclass loot variants: two
+    rules targeting the same typeclass + area_tag are counted as
+    independent populations, because the identity tags stamped at
+    spawn time differ between them.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, rule_id, **overrides):
+        rule = {
+            "rule_id": rule_id,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def test_two_rules_same_typeclass_and_area_tag_counted_independently(self):
+        # Headline contract test: two rules in one file sharing the
+        # same typeclass + area_tag, distinct rule_ids. Under the old
+        # (typeclass, area_tag) discriminator both rules would see
+        # current=2 after two ticks and one would be "stuck" thinking
+        # the other satisfied its target. The new keying counts them
+        # independently — each rule's _count_living returns just its
+        # own rule's mob.
+        from evennia_mob_spawner.deployer import Deployer
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        _TickLoopFixture.make_room("Room 1")
+        _TickLoopFixture.make_room("Room 2")
+
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={
+            "shared.yaml": [self._rule(rule_id=1), self._rule(rule_id=2)],
+        }))
+        script = MobSpawnerScript.objects.filter(db_key="shared.yaml").first()
+
+        # Two ticks → each rule fills its target=1 independently
+        # (respawn_seconds=0 means no cooldown between ticks).
+        script.at_repeat()
+        script.at_repeat()
+
+        rule1 = script.db.spawn_table[0]
+        rule2 = script.db.spawn_table[1]
+        self.assertEqual(script._count_living(rule1), 1)
+        self.assertEqual(script._count_living(rule2), 1)
+        # Sanity: two distinct mobs exist in the world. If the old
+        # contract were in force, this would have spawned only one and
+        # the second rule would have stalled at the population gate.
+        self.assertEqual(
+            _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2,
+        )
+
+    def test_rule_id_collision_across_files_isolated(self):
+        # Two files each with rule_id=1, same typeclass + area_tag.
+        # The file tag prevents cross-file bleed in the count.
+        from evennia_mob_spawner.deployer import Deployer
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        _TickLoopFixture.make_room("Room 1")
+
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={
+            "file_a.yaml": [self._rule(rule_id=1)],
+            "file_b.yaml": [self._rule(rule_id=1)],
+        }))
+        script_a = MobSpawnerScript.objects.filter(db_key="file_a.yaml").first()
+        script_b = MobSpawnerScript.objects.filter(db_key="file_b.yaml").first()
+
+        # Only script_a ticks → its rule spawns one mob.
+        script_a.at_repeat()
+
+        rule_a = script_a.db.spawn_table[0]
+        rule_b = script_b.db.spawn_table[0]
+        self.assertEqual(script_a._count_living(rule_a), 1)
+        # script_b's count for ITS rule_id=1 must be 0, not 1 — the
+        # mob_spawner_file tag prevents script_a's mob from bleeding in.
+        self.assertEqual(script_b._count_living(rule_b), 0)
+
+    def test_count_excludes_mobs_lacking_identity_tags(self):
+        # Manually create a mob with the same typeclass + area_tag as
+        # a deployed rule but WITHOUT the new identity tags. Proves the
+        # count is driven by the identity tags, not by a typeclass +
+        # area_tag fallback.
+        from evennia.utils.create import create_object
+        from evennia_mob_spawner.deployer import Deployer
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        room = _TickLoopFixture.make_room("Room 1")
+
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={
+            "test.yaml": [self._rule(rule_id=1)],
+        }))
+        script = MobSpawnerScript.objects.filter(db_key="test.yaml").first()
+        rule = script.db.spawn_table[0]
+
+        # Create an "interloper" mob bypassing _spawn_one. It carries
+        # the same typeclass + area_tag the rule would produce, but
+        # lacks the mob_spawner_rule and mob_spawner_file identity tags.
+        interloper = create_object(
+            self.DEFAULT_OBJECT, key="interloper", location=room,
+        )
+        interloper.tags.add("test_area", category="mob_area")
+
+        # Sanity: the interloper IS findable by the old contract's
+        # discriminator (typeclass + area_tag), so any logic still
+        # using that would count it.
+        self.assertEqual(
+            _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1,
+        )
+
+        # But the new _count_living must return 0 — no rule produced
+        # the interloper, so it has no identity tags, so it's invisible
+        # to the per-rule count.
+        self.assertEqual(script._count_living(rule), 0)
