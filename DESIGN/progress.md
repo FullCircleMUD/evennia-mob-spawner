@@ -2,6 +2,21 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-05-17 — identity tags, fixture bootstrap, contract change, YAML tags
+
+Four related landings turning the (typeclass, area_tag) population-discriminator assumption into a structurally-guaranteed `(file, rule_id)` identity, plus the consumer-authoring surface that completes it.
+
+- **Identity tags stamped at spawn** — `_spawn_one` now adds `mob_spawner_rule = str(rule_id)` and `mob_spawner_file = self.db_key` to every mob alongside the existing `area_tag`. Dropped `@staticmethod`; method reads `self.db_key`. ([commit `1131286`](#))
+- **Limbo fixture for the test suite** — added `EvenniaWorldTestCase(TestCase)` base whose `setUpTestData` creates a Limbo room and points `settings.DEFAULT_HOME` at it. Refactored every test class that creates Evennia objects (TickLoopTest, RaceProtocolTest, SpawnIdentityTagTest, DeployerTest, PipelineScaffoldSmokeTest) to inherit from it. Fixes a latent FK-integrity fragility that hid as long as alphabetical test-class order kept polluting classes after non-polluting ones. ([commit `57dcefa`](#))
+- **`_count_living` keyed on `(file, rule_id)`** — replaced `db_typeclass_path + area_tag` filter with chained tag filters on `mob_spawner_rule + mob_spawner_file`. Two `.filter()` calls produce two JOINs against the many-to-many tag table (required for AND across two tag rows). Validator already enforces unique `rule_id` per file; file paths are unique by definition — so `(file, rule_id)` is a structurally guaranteed unique discriminator. Rules sharing `typeclass + area_tag` now count as independent populations, enabling the indistinguishable-variant pattern without typeclass proliferation. Architecture decisions #5 and #9 rewritten to match. ([commit `f0186f6`](#))
+- **YAML-declared `tags:` field** — optional rule field accepting bare strings (untyped tags), dicts with `key` only (untyped via dict), or dicts with `key + category` (categorised). Mirrors `evennia-world-builder`'s shape for consumer-surface consistency. Reserved category prefix `mob_spawner_` refused at validation to prevent authors from spoofing the identity tags. Tier 1 predicates: `_check_tags_field_shape` + `_check_tags_no_reserved_category`. `_spawn_one` loops over `rule.get("tags")` after the identity stamps and calls `mob.tags.add(key, category=category)` per entry. ([commit `3d420fa`](#))
+
+**Combined effect:** consumers can now author rules that share typeclass + area_tag, differing only in attrs and tags — exactly the shape needed to express loot-variant populations (Wolf / WolfFat / WolfRecipeLoad) as pure data instead of Python subclass proliferation. Cross-library smoke-testable via the `tagged.yaml` rules in [evennia-mob-spawner-test-yaml](https://github.com/FullCircleMUD/evennia-mob-spawner-test-yaml) (which use `area_tag`s the [test-world](https://github.com/FullCircleMUD/evennia-mob-spawner-test-world) repo provides rooms for).
+
+**199 tests green** (was 164, +35: identity-tag stamping, `_count_living` contract, `tags` validator predicates, `tags` spawn behaviour, plus the test-base refactor).
+
+Out of scope for this batch: `_room_has_space` still keys on `(typeclass, area_tag)`. Same shape of work as `_count_living`, deferred to the next library piece.
+
 ## 2026-05-15 (afternoon — latest)
 
 **Pass C landed — race protocol primitives. `MobSpawnerScript.stop_when_safe` / `force_stop` + Deployer drain-before-swap (decision #13). The library is functionally complete against architecture v0.**

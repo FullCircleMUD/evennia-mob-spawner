@@ -143,11 +143,14 @@ A rule sets one or the other, not both.
 
 ### Tags applied at spawn time
 
-On every spawn the library stamps the new mob with the rule's `area_tag` under the configured category (decision #2). This is the only tag the library applies. Useful by default: the consumer's AI / wander logic can read the same tag to constrain movement, and the tick loop's population counting depends on it.
+The library stamps four categories of tag on each new mob:
 
-**No additional tags applied by the library.** The v0 rule schema has no generic `tags:` field for the library to interpret. Consumers who need per-spawn tagging beyond `area_tag` (e.g. FCM's `spawn_resources` / `spawn_gold` / `spawn_scrolls` / `spawn_recipes` loot-category markers) implement that in their typeclass's `at_object_creation` or in `ms_at_post_spawn()` — those are consumer concerns, not library concerns (decision #2 + principle 2).
+- **`area_tag`** under the configured category (decision #2) — drives the consumer's AI / wander constraint and is the room-pool key for spawn selection.
+- **`mob_spawner_rule`** with value `str(rule_id)` — identity breadcrumb.
+- **`mob_spawner_file`** with value of the script's `db_key` (the rule-set file path) — identity breadcrumb. Together with `mob_spawner_rule` it's the population discriminator the tick loop counts on (decision #9).
+- **YAML-declared `tags`** from the rule's optional `tags:` field — bare strings (untyped) or `{key, category?}` dicts. Lets authors stamp arbitrary tags (e.g. FCM's `spawn_resources` / `spawn_gold` eligibility flags) without consumer-side code. Reserved category prefix `mob_spawner_` is refused at validation to prevent spoofing the identity tags.
 
-**No breadcrumb attributes pointing back at the library.** The library doesn't need them; it observes the world rather than receiving notifications (decision #5).
+The identity tags are *passive identifiers* — the library queries them, the typeclass doesn't read or write them. They are not a callback protocol; the library still observes the world rather than receiving notifications (decision #5).
 
 ### Death detection (observation, not notification)
 
