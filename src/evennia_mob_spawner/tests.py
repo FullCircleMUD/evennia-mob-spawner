@@ -8,7 +8,30 @@ the spawn-rule pipeline as it is built out.
 
 import time
 
+from django.conf import settings
 from django.test import TestCase, override_settings
+
+
+class EvenniaWorldTestCase(TestCase):
+    """Base for tests that create Evennia objects via ``create_object()``.
+
+    Pre-creates a Limbo room and points ``settings.DEFAULT_HOME`` at it.
+    Without this, ``create_object(...)`` calls that don't pass ``home=``
+    produce objects with a foreign key reference to a non-existent row,
+    which Django's SQLite constraint check eventually trips over.
+
+    ``setUpTestData`` runs once per class inside the class's outer test
+    transaction. Limbo persists across every test method in the class
+    and is rolled back when the class finishes.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        from evennia.utils.create import create_object
+        from evennia import DefaultRoom
+
+        cls.limbo = create_object(DefaultRoom, key="Limbo")
+        settings.DEFAULT_HOME = f"#{cls.limbo.id}"
 
 from evennia_yaml_reader import ReaderNotFoundError, ReaderResult
 
@@ -96,7 +119,7 @@ class LogShimSmokeTest(TestCase):
             ms_log(f"smoke test: level {level}", level=level)
 
 
-class PipelineScaffoldSmokeTest(TestCase):
+class PipelineScaffoldSmokeTest(EvenniaWorldTestCase):
     """Each pipeline stage is importable, instantiable, and runs end-to-end.
 
     The stages do no real work yet — Definitions parses, Finder returns
@@ -1436,7 +1459,7 @@ class Tier4DiagnosticTest(TestCase):
         self.assertEqual(warnings, [])
 
 
-class DeployerTest(TestCase):
+class DeployerTest(EvenniaWorldTestCase):
     """End-to-end deployment: script lookup-or-create, swap, preserve, purge.
 
     Uses real Evennia ``create_script`` / DB queries against the test
@@ -1620,7 +1643,7 @@ class _TickLoopFixture:
         ).count()
 
 
-class TickLoopTest(TestCase):
+class TickLoopTest(EvenniaWorldTestCase):
     """Tick-loop behaviour: observe / cooldown / spawn / death detection.
 
     Each test calls ``script.at_repeat()`` directly rather than
@@ -1829,7 +1852,7 @@ class TickLoopTest(TestCase):
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
 
 
-class RaceProtocolTest(TestCase):
+class RaceProtocolTest(EvenniaWorldTestCase):
     """Decision #13's race-safe drain: stop_when_safe + force_stop.
 
     The tick loop checks ``ndb._stop_requested`` between rules and
@@ -2085,7 +2108,7 @@ class YamlReaderDependencyTest(TestCase):
         )
 
 
-class SpawnIdentityTagTest(TestCase):
+class SpawnIdentityTagTest(EvenniaWorldTestCase):
     """Every spawned mob carries identity tags for rule + source file.
 
     Stamped by ``_spawn_one`` alongside the existing ``area_tag``:
