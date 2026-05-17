@@ -387,21 +387,28 @@ class MobSpawnerScript(_BASE_SCRIPT):
                 return room
         return None
 
-    @staticmethod
-    def _room_has_space(room, rule: dict) -> bool:
-        """True if ``room`` can hold one more mob of this rule's typeclass.
+    def _room_has_space(self, room, rule: dict) -> bool:
+        """True if ``room`` can hold one more mob from this rule.
 
-        Counts existing mobs of the rule's exact typeclass in this room
-        with the rule's area_tag, and compares against ``max_per_room``
-        (validator-enforced positive integer).
+        Counts mobs produced by THIS rule in this room — keyed on the
+        (file, rule_id) identity tags stamped at spawn (decision #9),
+        not on typeclass. Two rules sharing typeclass + area_tag enforce
+        their ``max_per_room`` caps independently.
+
+        Two chained ``.filter`` calls produce two separate JOINs against
+        the tag table — needed because a single ``.filter`` with both
+        tag conditions would look for one row satisfying both, which the
+        many-to-many tag table cannot provide.
         """
         from evennia.objects.models import ObjectDB
 
         mob_count = ObjectDB.objects.filter(
-            db_typeclass_path=rule["typeclass"],
             db_location=room,
-            db_tags__db_key=rule["area_tag"],
-            db_tags__db_category=get_area_tag_category(),
+            db_tags__db_key=str(rule["rule_id"]),
+            db_tags__db_category=_RULE_TAG_CATEGORY,
+        ).filter(
+            db_tags__db_key=self.db_key,
+            db_tags__db_category=_FILE_TAG_CATEGORY,
         ).count()
         return mob_count < rule["max_per_room"]
 

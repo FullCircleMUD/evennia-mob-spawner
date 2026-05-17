@@ -131,7 +131,7 @@ Three patterns, **layered** within a single rule — a rule may declare any comb
 2. **Den / lair** — `den_room_tag: <key>` means "spawn in this one specific tagged room" (single-room boss lair). Used as Step 2 when `spawn_with_typeclass` is absent or its leader can't be found / its room is full.
 3. **Random within area** — implicit default; uniform pick from all rooms in the rule's `area_tag` that haven't hit `max_per_room`. Used when neither Step 1 nor Step 2 yielded a room.
 
-All three respect `max_per_room`. All three are tag-or-typeclass queries; no room dbrefs ever travel through rule data. Mixing two or more in one rule is the intentional way to author "prefer pack-spawn, fall back to den, fall back to random" choreography (e.g. a champion that spawns next to its commander but retreats to its den if the commander is dead).
+All three respect `max_per_room`, which is enforced **per-rule** via the identity tags stamped at spawn (decision #9) — two rules sharing typeclass + area_tag cap their populations independently. No room dbrefs ever travel through rule data. Mixing two or more patterns in one rule is the intentional way to author "prefer pack-spawn, fall back to den, fall back to random" choreography (e.g. a champion that spawns next to its commander but retreats to its den if the commander is dead).
 
 ### Population maintenance
 

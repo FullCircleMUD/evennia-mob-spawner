@@ -2,6 +2,18 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-05-17 — `_room_has_space` migrated, contract change complete
+
+`_room_has_space(room, rule)` now keys on the same `(file, rule_id)` identity tags as `_count_living`, completing the contract change started earlier today. The library's `max_per_room` enforcement is now truly per-rule: two rules sharing typeclass + area_tag cap their per-room populations independently rather than competing in one pool.
+
+Closes the half-state where the variant-collapse PoC in `fcm-mobs/shard0/millholm/woods.yaml` (single base `Wolf` typeclass, 5 rules) would have capped at one wolf per room across all variants. Each rule's cap now applies to only its own mobs.
+
+Two new tests (`RoomHasSpaceContractTest`) cover the contract: independent per-rule caps under shared typeclass + area_tag, and within-rule cap still enforced. Existing `TickLoopTest.test_max_per_room_respected` is invariant under the change (single-rule scenarios give the same count either way).
+
+**Variant-collapse is now fully functional under shared typeclass + shared area_tag.** Typeclass is now purely an instantiation instruction in library code — no remaining population-counting paths key on it. Pack-leader lookup (`spawn_with_typeclass`) is the one remaining typeclass-keyed query, and it's a cross-rule "find a leader of class X" lookup, not per-rule population counting; out of scope for this contract change.
+
+**201 tests green** (was 199, +2).
+
 ## 2026-05-17 — identity tags, fixture bootstrap, contract change, YAML tags
 
 Four related landings turning the (typeclass, area_tag) population-discriminator assumption into a structurally-guaranteed `(file, rule_id)` identity, plus the consumer-authoring surface that completes it.

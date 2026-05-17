@@ -2589,3 +2589,86 @@ class YamlDeclaredTagsTest(EvenniaWorldTestCase):
         # No untyped tags (library never stamps any).
         untyped = mob.tags.get(category=None, return_list=True) or []
         self.assertEqual(untyped, [])
+
+
+class RoomHasSpaceContractTest(EvenniaWorldTestCase):
+    """``_room_has_space`` keys on (file, rule_id), not (typeclass, area_tag).
+
+    The contract change makes the per-room ``max_per_room`` cap truly
+    per-rule. Two rules sharing typeclass + area_tag enforce their caps
+    independently — a room can hold one mob from each rule rather than
+    one mob TOTAL across both. Completes the contract migration started
+    with ``_count_living``.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, rule_id, **overrides):
+        rule = {
+            "rule_id": rule_id,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def test_two_rules_share_typeclass_and_area_tag_but_max_per_room_is_independent(self):
+        # Two rules in one file sharing typeclass + area_tag, each with
+        # max_per_room=1. One shared room. Under the old (typeclass,
+        # area_tag) discriminator the second rule would see the first
+        # rule's mob and skip ("room full"). Under the new (file,
+        # rule_id) discriminator each rule's cap is enforced against
+        # only its own mobs, so both spawn into the same room.
+        from evennia_mob_spawner.deployer import Deployer
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        _TickLoopFixture.make_room("Shared Room")
+
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={
+            "shared.yaml": [self._rule(rule_id=1), self._rule(rule_id=2)],
+        }))
+        script = MobSpawnerScript.objects.filter(db_key="shared.yaml").first()
+
+        script.at_repeat()
+        script.at_repeat()
+
+        rule1 = script.db.spawn_table[0]
+        rule2 = script.db.spawn_table[1]
+        # Each rule should have hit its target (1 mob).
+        self.assertEqual(script._count_living(rule1), 1)
+        self.assertEqual(script._count_living(rule2), 1)
+        # Two mobs total in the room — confirms the per-room cap
+        # was enforced per-rule, not as a shared pool.
+        self.assertEqual(
+            _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2,
+        )
+
+    def test_max_per_room_still_blocks_within_a_single_rule(self):
+        # Defensive: the change is about *which* mobs count, not about
+        # removing the cap. One rule, target=3, max_per_room=1, one
+        # room — only one mob should ever exist there.
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        _TickLoopFixture.make_room("Only Room")
+        script = _TickLoopFixture.deploy_rule(
+            self._rule(rule_id=1, target=3, max_per_room=1),
+        )
+
+        script.at_repeat()
+        script.at_repeat()
+        script.at_repeat()
+
+        self.assertEqual(
+            _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1,
+        )
+
