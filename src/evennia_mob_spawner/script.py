@@ -67,6 +67,12 @@ _BASE_SCRIPT = class_from_module(
 
 _MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
 
+# Tag categories stamped on every spawned mob. Together with ``area_tag``
+# they form the queryable identity breadcrumb on each mob: which rule
+# produced it, and which rule-set file that rule lives in.
+_RULE_TAG_CATEGORY = "mob_spawner_rule"
+_FILE_TAG_CATEGORY = "mob_spawner_file"
+
 
 class MobSpawnerScript(_BASE_SCRIPT):
     """One persistent script per rule-set YAML file.
@@ -386,13 +392,14 @@ class MobSpawnerScript(_BASE_SCRIPT):
         ).count()
         return mob_count < rule["max_per_room"]
 
-    @staticmethod
-    def _spawn_one(rule: dict, room):
+    def _spawn_one(self, rule: dict, room):
         """Create one mob from ``rule`` in ``room``.
 
         Sequence:
         - ``create_object`` with the rule's typeclass and key.
-        - Re-tag with the rule's ``area_tag`` (decision #2).
+        - Stamp identity tags: ``area_tag`` (decision #2), the rule's
+          ``rule_id``, and the source file path. Together these are the
+          mob's breadcrumb back to the rule that produced it.
         - Apply ``desc`` override if present.
         - Apply ``attrs`` overrides via ``setattr`` (compatible with
           Evennia's ``AttributeProperty`` descriptors).
@@ -407,8 +414,12 @@ class MobSpawnerScript(_BASE_SCRIPT):
             key=rule["key"],
             location=room,
         )
-        # Re-tag with area_tag under the configured category.
         mob.tags.add(rule["area_tag"], category=get_area_tag_category())
+        # rule_id is a non-negative int; tag keys are strings.
+        # self.db_key is the script's persistent key, set by the Deployer
+        # to the rule-set file's repo path.
+        mob.tags.add(str(rule["rule_id"]), category=_RULE_TAG_CATEGORY)
+        mob.tags.add(self.db_key, category=_FILE_TAG_CATEGORY)
 
         # Apply rule-level description override.
         if "desc" in rule:

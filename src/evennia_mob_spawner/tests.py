@@ -2083,3 +2083,111 @@ class YamlReaderDependencyTest(TestCase):
             set(ReaderResult.__dataclass_fields__.keys()),
             {"raw_bytes", "parsed"},
         )
+
+
+class SpawnIdentityTagTest(TestCase):
+    """Every spawned mob carries identity tags for rule + source file.
+
+    Stamped by ``_spawn_one`` alongside the existing ``area_tag``:
+      - ``mob_spawner_rule`` category, key = ``str(rule_id)``
+      - ``mob_spawner_file`` category, key = ``script.db_key``
+
+    Together they let callers query "every mob from rule X in file Y"
+    without relying on (typeclass, area_tag) being a unique discriminator.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, rule_id, **overrides):
+        rule = {
+            "rule_id": rule_id,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def _spawned_mob(self, path="identity_test.yaml", rule_id=7):
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(
+            self._rule(rule_id=rule_id), path=path,
+        )
+        script.at_repeat()
+        from evennia.objects.models import ObjectDB
+        mob = ObjectDB.objects.filter(
+            db_typeclass_path=self.DEFAULT_OBJECT,
+            db_tags__db_key="test_area",
+            db_tags__db_category="mob_area",
+        ).first()
+        self.assertIsNotNone(mob, "fixture did not spawn a mob")
+        return mob, script
+
+    def test_spawned_mob_carries_rule_id_tag(self):
+        mob, _ = self._spawned_mob(rule_id=7)
+        rule_tags = mob.tags.get(
+            category="mob_spawner_rule", return_list=True,
+        ) or []
+        self.assertEqual(rule_tags, ["7"])
+
+    def test_spawned_mob_carries_file_path_tag(self):
+        mob, script = self._spawned_mob(path="identity_test.yaml")
+        file_tags = mob.tags.get(
+            category="mob_spawner_file", return_list=True,
+        ) or []
+        self.assertEqual(file_tags, [script.db_key])
+
+    def test_spawned_mob_retains_area_tag(self):
+        # Identity-tag stamping must not displace area_tag.
+        mob, _ = self._spawned_mob()
+        area_tags = mob.tags.get(
+            category="mob_area", return_list=True,
+        ) or []
+        self.assertIn("test_area", area_tags)
+
+    def test_two_rules_in_same_file_get_distinct_rule_tags(self):
+        # Two mobs from the same file but different rule_ids must end
+        # up with different rule-id tag values.
+        from evennia_mob_spawner.deployer import Deployer
+        from evennia_mob_spawner.script import MobSpawnerScript
+        from evennia.objects.models import ObjectDB
+
+        _TickLoopFixture.make_room("Test Room A", area_tag="area_a")
+        _TickLoopFixture.make_room("Test Room B", area_tag="area_b")
+
+        defs = Definitions.from_dict({"levels": []})
+        Deployer(defs).deploy(LoadResult(rule_sets={
+            "two_rules.yaml": [
+                self._rule(rule_id=1, area_tag="area_a"),
+                self._rule(rule_id=2, area_tag="area_b"),
+            ],
+        }))
+        script = MobSpawnerScript.objects.filter(db_key="two_rules.yaml").first()
+        script.at_repeat()
+
+        mob_a = ObjectDB.objects.filter(
+            db_typeclass_path=self.DEFAULT_OBJECT,
+            db_tags__db_key="area_a", db_tags__db_category="mob_area",
+        ).first()
+        mob_b = ObjectDB.objects.filter(
+            db_typeclass_path=self.DEFAULT_OBJECT,
+            db_tags__db_key="area_b", db_tags__db_category="mob_area",
+        ).first()
+        self.assertIsNotNone(mob_a)
+        self.assertIsNotNone(mob_b)
+        self.assertEqual(
+            mob_a.tags.get(category="mob_spawner_rule", return_list=True),
+            ["1"],
+        )
+        self.assertEqual(
+            mob_b.tags.get(category="mob_spawner_rule", return_list=True),
+            ["2"],
+        )
