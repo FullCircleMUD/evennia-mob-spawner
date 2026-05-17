@@ -438,6 +438,132 @@ def _check_den_room_tag_well_formed(loaded: LoadedRule) -> str | None:
     return None
 
 
+# Tag entries accept the same shapes Evennia's TagHandler.add() does:
+# bare string (untyped tag), dict with `key` only (untyped tag), or
+# dict with both `key` and `category` (categorised tag). ``data=`` is
+# not exposed in YAML (matches world-builder's choice).
+_TAG_DICT_ALLOWED_KEYS = frozenset({"key", "category"})
+
+# Library-reserved tag categories that authors cannot stamp from YAML.
+# Anything under this prefix is owned by the library (identity tags
+# stamped at spawn time); allowing authors to spoof these would
+# corrupt the (file, rule_id) population discriminator.
+_RESERVED_TAG_CATEGORY_PREFIX = "mob_spawner_"
+
+
+def _normalise_tag(entry):
+    """Return ``(key, category)`` from either accepted tag-entry shape.
+
+    Caller is responsible for first running ``_check_tags_field_shape``
+    against the parent rule — this helper assumes the entry has the
+    correct shape (string, or dict with `key` + optional `category`).
+    """
+    if isinstance(entry, str):
+        return entry, None
+    return entry["key"], entry.get("category")
+
+
+def _check_tags_field_shape(loaded: LoadedRule) -> str | None:
+    """Optional shape: ``tags`` is a list of strings or `{key, category?}` dicts.
+
+    Each entry is one of:
+    - A non-empty string (untyped tag)
+    - A mapping with ``key`` (non-empty string, required) and optionally
+      ``category`` (non-empty string). No other keys allowed.
+
+    Empty list is permitted (no-op). Field absent is permitted.
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "tags" not in rule:
+        return None
+
+    value = rule["tags"]
+    if not isinstance(value, list):
+        return (
+            f"{loaded.path}: 'tags' must be a list, "
+            f"got {type(value).__name__}"
+        )
+
+    for i, entry in enumerate(value):
+        prefix = f"{loaded.path}: 'tags[{i}]'"
+        if isinstance(entry, str):
+            if not entry.strip():
+                return f"{prefix} must be a non-empty string"
+            continue
+        if not isinstance(entry, dict):
+            return (
+                f"{prefix} must be a string or mapping, "
+                f"got {type(entry).__name__}"
+            )
+
+        extra = set(entry.keys()) - _TAG_DICT_ALLOWED_KEYS
+        if extra:
+            return (
+                f"{prefix} has unsupported key(s) {sorted(extra)!r}; "
+                f"allowed keys are {sorted(_TAG_DICT_ALLOWED_KEYS)!r}"
+            )
+
+        if "key" not in entry:
+            return f"{prefix} missing required 'key'"
+        key = entry["key"]
+        if not isinstance(key, str):
+            return (
+                f"{prefix} 'key' must be a string, "
+                f"got {type(key).__name__}"
+            )
+        if not key.strip():
+            return f"{prefix} 'key' must be a non-empty string"
+
+        if "category" in entry:
+            category = entry["category"]
+            if not isinstance(category, str):
+                return (
+                    f"{prefix} 'category' must be a string, "
+                    f"got {type(category).__name__}"
+                )
+            if not category.strip():
+                return (
+                    f"{prefix} 'category' must be a non-empty string"
+                )
+
+    return None
+
+
+def _check_tags_no_reserved_category(loaded: LoadedRule) -> str | None:
+    """Optional shape: no tag may target a library-reserved category.
+
+    Categories starting with ``mob_spawner_`` are owned by the library
+    (identity tags stamped by ``_spawn_one`` at spawn time). Allowing
+    YAML to stamp tags in those categories would let authors spoof the
+    (file, rule_id) population discriminator. Refused.
+
+    Defers cleanly if the field shape would already fail (sibling
+    predicate ``_check_tags_field_shape`` reports those findings).
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None or "tags" not in rule:
+        return None
+
+    value = rule["tags"]
+    if not isinstance(value, list):
+        return None  # shape predicate owns this finding
+
+    for i, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            continue
+        category = entry.get("category")
+        if not isinstance(category, str):
+            continue
+        if category.startswith(_RESERVED_TAG_CATEGORY_PREFIX):
+            return (
+                f"{loaded.path}: 'tags[{i}]' uses reserved category "
+                f"{category!r} (prefix {_RESERVED_TAG_CATEGORY_PREFIX!r} "
+                f"is owned by the library)"
+            )
+
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Tier 3 — engine-runtime predicates.
 #
@@ -734,6 +860,8 @@ class Validator:
         _check_attrs_well_formed,
         _check_spawn_with_typeclass_well_formed,
         _check_den_room_tag_well_formed,
+        _check_tags_field_shape,
+        _check_tags_no_reserved_category,
     )
 
     # Tier 3 — same shape as Tier 1, but only active when

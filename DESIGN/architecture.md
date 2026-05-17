@@ -99,6 +99,7 @@ Inherits today's FCM JSON shape, plus `rule_id`. Mandatory-vs-optional split is 
 | `attrs` | optional | Mapping of `{attribute_name: value}` overrides applied to the spawned mob. The library applies them generically; semantics belong to the consumer's typeclass. |
 | `spawn_with_typeclass` | optional | Pack-spawn trigger (Step 1 of room selection): spawn into the room currently containing a living instance of this typeclass within the rule's `area_tag`. Falls through to den / random if no leader is found. |
 | `den_room_tag` | optional | Single-room lair (Step 2 of room selection): spawn into the one room tagged with this key. Uses the same `mob_area` tag category as `area_tag` (decision #16); the distinction is the rule field that references the tag, not the category. Falls through to random `area_tag` pool if the den is full. |
+| `tags` | optional | List of tags to stamp on each spawned mob, in addition to the library-stamped identity tags (`area_tag`, `mob_spawner_rule`, `mob_spawner_file`). Each entry is a bare string (untyped tag) or a mapping with `key` (required, non-empty string) and optional `category` (non-empty string). Mirrors the YAML shape accepted by `evennia-world-builder`. Reserved category prefix `mob_spawner_` is refused at validation time to prevent authors from spoofing the population discriminator. |
 
 ## The tick loop
 

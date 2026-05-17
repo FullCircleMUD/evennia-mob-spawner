@@ -42,7 +42,8 @@ The tick loop:
       5. Room selection — three-tier fallback (decision #22):
             pack (`spawn_with_typeclass`) → den (`den_room_tag`) → random.
          All respect `max_per_room`.
-      6. Spawn — `create_object` + re-tag with area_tag + apply `desc` /
+      6. Spawn — `create_object` + re-tag with area_tag + identity tags
+         (rule_id, file) + any YAML-declared `tags` + apply `desc` /
          `attrs` overrides + invoke `mob.ms_at_post_spawn()` if present.
       7. Save state — update `last_observed_count`, `spawned_last_tick`,
          `last_spawn_time` (if spawned).
@@ -55,6 +56,7 @@ from evennia.utils.utils import class_from_module
 
 from .config import get_area_tag_category, get_tick_seconds
 from .log import ms_log
+from .validator import _normalise_tag
 
 
 # Resolve the base script class at module-import time. Falls back to
@@ -411,6 +413,10 @@ class MobSpawnerScript(_BASE_SCRIPT):
         - Stamp identity tags: ``area_tag`` (decision #2), the rule's
           ``rule_id``, and the source file path. Together these are the
           mob's breadcrumb back to the rule that produced it.
+        - Stamp YAML-declared ``tags`` if the rule provides them. Each
+          entry is either a bare string (untyped) or a mapping with
+          ``key`` + optional ``category``. Reserved categories (prefix
+          ``mob_spawner_``) are refused at validation time.
         - Apply ``desc`` override if present.
         - Apply ``attrs`` overrides via ``setattr`` (compatible with
           Evennia's ``AttributeProperty`` descriptors).
@@ -431,6 +437,13 @@ class MobSpawnerScript(_BASE_SCRIPT):
         # to the rule-set file's repo path.
         mob.tags.add(str(rule["rule_id"]), category=_RULE_TAG_CATEGORY)
         mob.tags.add(self.db_key, category=_FILE_TAG_CATEGORY)
+
+        # YAML-declared tags (optional). Shape pre-validated by
+        # ``_check_tags_field_shape``; ``_normalise_tag`` collapses
+        # string vs dict entries to a uniform ``(key, category)`` pair.
+        for tag_entry in rule.get("tags") or []:
+            key, category = _normalise_tag(tag_entry)
+            mob.tags.add(key, category=category)
 
         # Apply rule-level description override.
         if "desc" in rule:

@@ -959,6 +959,149 @@ class OptionalAttrsPredicateTest(TestCase):
         self.assertIn("'attrs' must be a mapping", finding)
 
 
+class TagsFieldShapeTest(TestCase):
+    """`tags` field shape — list of strings or {key, category?} dicts."""
+
+    def _rule(self, **fields):
+        base = {k: v for k, v in _VALID_RULE.items() if k != "tags"}
+        base.update(fields)
+        return base
+
+    def _check(self, **fields):
+        from evennia_mob_spawner.validator import _check_tags_field_shape
+        return _check_tags_field_shape(LoadedRule("p", self._rule(**fields)))
+
+    def test_tags_absent_passes(self):
+        self.assertIsNone(self._check())
+
+    def test_tags_empty_list_passes(self):
+        self.assertIsNone(self._check(tags=[]))
+
+    def test_tags_bare_string_passes(self):
+        self.assertIsNone(self._check(tags=["my_tag"]))
+
+    def test_tags_dict_key_only_passes(self):
+        self.assertIsNone(self._check(tags=[{"key": "my_tag"}]))
+
+    def test_tags_dict_key_and_category_passes(self):
+        self.assertIsNone(
+            self._check(tags=[{"key": "my_tag", "category": "my_cat"}])
+        )
+
+    def test_tags_mixed_shapes_passes(self):
+        self.assertIsNone(self._check(tags=[
+            "bare",
+            {"key": "only_key"},
+            {"key": "with_cat", "category": "cat"},
+        ]))
+
+    def test_tags_not_a_list_rejected(self):
+        finding = self._check(tags={"key": "x"})
+        self.assertIn("'tags' must be a list", finding)
+
+    def test_tags_entry_not_str_or_dict_rejected(self):
+        finding = self._check(tags=[7])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("string or mapping", finding)
+
+    def test_tags_empty_string_entry_rejected(self):
+        finding = self._check(tags=["  "])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("non-empty string", finding)
+
+    def test_tags_dict_missing_key_rejected(self):
+        finding = self._check(tags=[{"category": "cat"}])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("missing required 'key'", finding)
+
+    def test_tags_dict_empty_key_rejected(self):
+        finding = self._check(tags=[{"key": ""}])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("'key' must be a non-empty string", finding)
+
+    def test_tags_dict_non_string_key_rejected(self):
+        finding = self._check(tags=[{"key": 5}])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("'key' must be a string", finding)
+
+    def test_tags_dict_non_string_category_rejected(self):
+        finding = self._check(tags=[{"key": "k", "category": 5}])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("'category' must be a string", finding)
+
+    def test_tags_dict_empty_category_rejected(self):
+        finding = self._check(tags=[{"key": "k", "category": ""}])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("'category' must be a non-empty string", finding)
+
+    def test_tags_dict_extra_keys_rejected(self):
+        finding = self._check(tags=[{"key": "k", "data": "x"}])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("unsupported key", finding)
+
+
+class TagsReservedCategoryTest(TestCase):
+    """`tags` entries cannot use library-reserved `mob_spawner_*` categories."""
+
+    def _rule(self, **fields):
+        base = {k: v for k, v in _VALID_RULE.items() if k != "tags"}
+        base.update(fields)
+        return base
+
+    def _check(self, **fields):
+        from evennia_mob_spawner.validator import _check_tags_no_reserved_category
+        return _check_tags_no_reserved_category(LoadedRule("p", self._rule(**fields)))
+
+    def test_tags_absent_passes(self):
+        self.assertIsNone(self._check())
+
+    def test_non_reserved_category_passes(self):
+        self.assertIsNone(
+            self._check(tags=[{"key": "k", "category": "spawn_resources"}])
+        )
+
+    def test_bare_string_passes(self):
+        # Bare strings have no category — can't collide with reserved prefix.
+        self.assertIsNone(self._check(tags=["plain"]))
+
+    def test_dict_without_category_passes(self):
+        self.assertIsNone(self._check(tags=[{"key": "k"}]))
+
+    def test_reserved_rule_category_rejected(self):
+        finding = self._check(tags=[
+            {"key": "1", "category": "mob_spawner_rule"},
+        ])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("reserved category", finding)
+        self.assertIn("mob_spawner_", finding)
+
+    def test_reserved_file_category_rejected(self):
+        finding = self._check(tags=[
+            {"key": "any.yaml", "category": "mob_spawner_file"},
+        ])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("reserved category", finding)
+
+    def test_reserved_prefix_anything_rejected(self):
+        # Anything starting with mob_spawner_ is refused, not just the
+        # currently-used categories.
+        finding = self._check(tags=[
+            {"key": "k", "category": "mob_spawner_future_thing"},
+        ])
+        self.assertIn("tags[0]", finding)
+        self.assertIn("reserved category", finding)
+
+    def test_mixed_legal_and_reserved_rejected_on_first_reserved(self):
+        # Two legal entries surrounding one reserved — finding identifies the
+        # reserved entry by index.
+        finding = self._check(tags=[
+            {"key": "k1", "category": "spawn_resources"},
+            {"key": "k2", "category": "mob_spawner_rule"},
+            {"key": "k3", "category": "spawn_gold"},
+        ])
+        self.assertIn("tags[1]", finding)
+
+
 class ValidatorPredicateIntegrationTest(TestCase):
     """End-to-end through Validator.validate() exercising real predicates."""
 
@@ -2344,3 +2487,105 @@ class CountLivingContractTest(EvenniaWorldTestCase):
         # the interloper, so it has no identity tags, so it's invisible
         # to the per-rule count.
         self.assertEqual(script._count_living(rule), 0)
+
+
+class YamlDeclaredTagsTest(EvenniaWorldTestCase):
+    """The `tags:` rule field stamps additional tags on each spawned mob.
+
+    Each entry is a bare string (untyped) or a `{key, category?}` dict.
+    Library-stamped tags (area_tag, identity tags) are unaffected.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, **overrides):
+        rule = {
+            "rule_id": 1,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def _spawn_mob_with(self, tags):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        from evennia.objects.models import ObjectDB
+
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(self._rule(tags=tags))
+        script.at_repeat()
+        mob = ObjectDB.objects.filter(
+            db_typeclass_path=self.DEFAULT_OBJECT,
+            db_tags__db_key="test_area",
+            db_tags__db_category="mob_area",
+        ).first()
+        self.assertIsNotNone(mob, "fixture did not spawn a mob")
+        return mob
+
+    def test_bare_string_tag_stamped_untyped(self):
+        mob = self._spawn_mob_with(["plain_flag"])
+        # An "untyped" Evennia tag has category=None — query under None.
+        keys = mob.tags.get(category=None, return_list=True) or []
+        self.assertIn("plain_flag", keys)
+
+    def test_dict_with_category_stamped_correctly(self):
+        mob = self._spawn_mob_with([
+            {"key": "spawn_resources", "category": "spawn_resources"},
+        ])
+        keys = mob.tags.get(category="spawn_resources", return_list=True) or []
+        self.assertEqual(keys, ["spawn_resources"])
+
+    def test_dict_without_category_stamped_untyped(self):
+        mob = self._spawn_mob_with([{"key": "key_only"}])
+        keys = mob.tags.get(category=None, return_list=True) or []
+        self.assertIn("key_only", keys)
+
+    def test_mixed_shapes_all_stamped(self):
+        mob = self._spawn_mob_with([
+            "bare",
+            {"key": "untyped_via_dict"},
+            {"key": "spawn_gold", "category": "spawn_gold"},
+        ])
+        untyped = mob.tags.get(category=None, return_list=True) or []
+        self.assertIn("bare", untyped)
+        self.assertIn("untyped_via_dict", untyped)
+        gold = mob.tags.get(category="spawn_gold", return_list=True) or []
+        self.assertEqual(gold, ["spawn_gold"])
+
+    def test_tags_field_absent_no_extra_tags(self):
+        # Without a `tags:` field, the mob carries ONLY the library-stamped
+        # tags (area_tag + identity tags) — no extras leak in.
+        from evennia_mob_spawner.script import MobSpawnerScript
+        from evennia.objects.models import ObjectDB
+
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(self._rule())  # no tags key
+        script.at_repeat()
+        mob = ObjectDB.objects.filter(
+            db_typeclass_path=self.DEFAULT_OBJECT,
+            db_tags__db_key="test_area",
+            db_tags__db_category="mob_area",
+        ).first()
+        self.assertIsNotNone(mob)
+
+        # Library-stamped tags are present.
+        self.assertIn(
+            "test_area",
+            mob.tags.get(category="mob_area", return_list=True) or [],
+        )
+        self.assertIn(
+            "1",
+            mob.tags.get(category="mob_spawner_rule", return_list=True) or [],
+        )
+        # No untyped tags (library never stamps any).
+        untyped = mob.tags.get(category=None, return_list=True) or []
+        self.assertEqual(untyped, [])
