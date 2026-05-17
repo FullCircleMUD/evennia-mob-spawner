@@ -22,8 +22,13 @@ Currently shipped (architecture decision #7's full set):
 - ``ms_delete`` — remove matching scripts entirely from the DB. No state
                    preserved; full clean slate.
 - ``ms_status`` — read-only inspect of matching scripts.
+- ``ms_spawn_report`` — population census: per-rule current vs target,
+                   grouped by ``area_tag`` within each script. Separate
+                   from ``ms_status`` by design — ``ms_status`` answers
+                   "what is the spawner doing?" (script state, ticks,
+                   cooldowns); this command answers "what mobs exist?".
 
-All five share the same scope-query syntax (``all | <level>=<value>``)
+All six share the same scope-query syntax (``all | <level>=<value>``)
 and the same async dispatch pattern; the operations differ only in
 what they do to the resolved scripts. Scope resolution walks the
 manifest via Finder; an empty query (``all``) bypasses the manifest
@@ -705,3 +710,89 @@ class CmdMsStatus(_MsOperateBase):
             except Exception:
                 pass
         messages.append(line)
+
+
+class CmdMsSpawnReport(_MsOperateBase):
+    """Population census of mobs spawned by matching scripts.
+
+    Usage:
+        ms_spawn_report all
+        ms_spawn_report <level>=<value> [<level>=<value> ...]
+
+    For each script in scope, walks the rule table and emits per-rule
+    current-vs-target counts, grouped by ``area_tag``. Per-area
+    subtotals and a per-script total are appended. Under-target rules
+    are marked with a trailing ``*`` for scanability.
+
+    Counts are live: each rule does a tag-indexed ``COUNT`` query
+    (``_count_living``) at report time. State of the script
+    (active / paused / stopped) is shown as context but does NOT filter
+    which scripts are reported — a paused script with ``current=0`` is
+    exactly the kind of thing the report is meant to surface.
+
+    The report deliberately answers only "what mobs exist?". For
+    "why is this rule under target?" (cooldown state, etc.) use
+    ``ms_status``. Splitting the two keeps each output focused.
+    """
+
+    key = "ms_spawn_report"
+    op_label = "report"
+
+    def apply(self, script, messages: list) -> None:
+        state = _script_state(script)
+        rules = script.db.spawn_table or []
+
+        if not rules:
+            messages.append(f"  {script.db_key}: {state}, no rules")
+            return
+
+        messages.append(f"  {script.db_key}: {state}")
+
+        # Group rules by area_tag, preserving rule order within each
+        # group. Python dicts preserve insertion order, which we want
+        # here so author-controlled rule order in YAML carries through.
+        by_area: dict = {}
+        for rule in rules:
+            by_area.setdefault(rule["area_tag"], []).append(rule)
+
+        script_target = 0
+        script_current = 0
+        for area_tag, area_rules in by_area.items():
+            messages.append(f"    {area_tag}:")
+            area_target = 0
+            area_current = 0
+            for rule in area_rules:
+                target = rule["target"]
+                try:
+                    current = script._count_living(rule)
+                except Exception as e:
+                    # Decision #14 sibling: per-rule errors don't kill
+                    # the whole report; log and surface the failure.
+                    msg = (
+                        f"      rule_id={rule.get('rule_id')} "
+                        f"count failed: {e}"
+                    )
+                    messages.append(msg)
+                    ms_log(
+                        f"ms_spawn_report: {script.db_key} "
+                        f"rule_id={rule.get('rule_id')}: {e}",
+                        level="ERROR",
+                    )
+                    continue
+
+                marker = "  *" if current < target else ""
+                messages.append(
+                    f"      rule_id={rule['rule_id']} "
+                    f"key={rule['key']!r} "
+                    f"target={target} current={current}{marker}"
+                )
+                area_target += target
+                area_current += current
+
+            messages.append(
+                f"      subtotal: {area_current}/{area_target}"
+            )
+            script_target += area_target
+            script_current += area_current
+
+        messages.append(f"    totals: {script_current}/{script_target}")

@@ -61,6 +61,7 @@ def _install_commands():
             CmdMsDelete,
             CmdMsLoad,
             CmdMsRestart,
+            CmdMsSpawnReport,
             CmdMsStatus,
             CmdMsStop,
         )
@@ -70,6 +71,7 @@ def _install_commands():
         self.add(CmdMsRestart())
         self.add(CmdMsDelete())
         self.add(CmdMsStatus())
+        self.add(CmdMsSpawnReport())
 
     AccountCmdSet.at_cmdset_creation = _ems_patched_at_cmdset_creation
     AccountCmdSet._evennia_mob_spawner_cmdset_patched = True
