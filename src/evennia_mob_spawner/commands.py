@@ -217,7 +217,7 @@ class CmdMsLoad(BaseCommand):
         # be called from the worker safely; the at_return / at_err
         # callbacks fire back on the reactor and flush the collected
         # message list there.
-        self.caller.msg("ms_load: running async (gameplay continues)…")
+        self.caller.msg(f"ms_load {args} : running async (gameplay continues)…")
         run_async(
             self._run_pipeline, query, flags,
             at_return=self._on_async_return,
@@ -519,7 +519,7 @@ class _MsOperateBase(BaseCommand):
 
         # Reader is needed only when the query is non-empty (manifest
         # walk). For `all`, we go straight to the DB.
-        self.caller.msg(f"{self.key}: running async (gameplay continues)…")
+        self.caller.msg(f"{self.key} {args} : running async (gameplay continues)…")
         run_async(
             self._run, query, flags,
             at_return=self._on_async_return,
