@@ -41,6 +41,22 @@ from evennia.utils.utils import run_async
 
 from evennia_yaml_reader import ReaderError
 
+# Optional integration with evennia-shards. When the shards library is
+# installed and configured, ``preserve_tenant_context`` captures the
+# active tenant at wrap time and re-applies it inside the deferred
+# worker thread — without this, ObjectDB rows (the per-room
+# MobSpawnerScript script-host objects) created in the worker would
+# land ``shard_id=NULL`` because multitenant's threading.local tenant
+# doesn't propagate across the ``run_async`` thread spawn. When the
+# shards library isn't installed, the import fails and we fall back
+# to an identity passthrough that's a no-op. See
+# ``evennia-shards/DESIGN/tenancy.md`` for the helper's contract.
+try:
+    from evennia_shards import preserve_tenant_context
+except ImportError:
+    def preserve_tenant_context(fn):
+        return fn
+
 from .config import get_configured_reader
 from .definitions import Definitions
 from .deployer import Deployer
@@ -217,9 +233,15 @@ class CmdMsLoad(BaseCommand):
         # be called from the worker safely; the at_return / at_err
         # callbacks fire back on the reactor and flush the collected
         # message list there.
+        #
+        # The pipeline callable is wrapped with preserve_tenant_context
+        # so any shards-tenant active on the reactor thread carries
+        # into the worker — without it, every Script row created in
+        # the worker would land unstamped. No-op when shards isn't
+        # installed (see top-of-file import).
         self.caller.msg(f"ms_load {args} : running async (gameplay continues)…")
         run_async(
-            self._run_pipeline, query, flags,
+            preserve_tenant_context(self._run_pipeline), query, flags,
             at_return=self._on_async_return,
             at_err=self._on_async_err,
         )
@@ -519,9 +541,13 @@ class _MsOperateBase(BaseCommand):
 
         # Reader is needed only when the query is non-empty (manifest
         # walk). For `all`, we go straight to the DB.
+        #
+        # preserve_tenant_context wrap mirrors the ms_load site above —
+        # any shards-tenant on the reactor thread carries into the
+        # worker. No-op when shards isn't installed.
         self.caller.msg(f"{self.key} {args} : running async (gameplay continues)…")
         run_async(
-            self._run, query, flags,
+            preserve_tenant_context(self._run), query, flags,
             at_return=self._on_async_return,
             at_err=self._on_async_err,
         )

@@ -1,0 +1,47 @@
+# Compatibility with `evennia-shards`
+
+The library is **compatible with [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) but does not require it**. The integration is a single optional import in [`commands.py`](../src/evennia_mob_spawner/commands.py) and a one-line wrap around each `run_async` dispatch.
+
+## What the integration does
+
+`ms_load` and `ms_validate` both defer their pipelines to a Twisted worker thread via `evennia.utils.utils.run_async`. Under a multi-tenant `shards` deployment, the worker thread spawns with a fresh `threading.local` — the active tenant set on the reactor thread does not carry across. Without intervention, any `Script` row created inside the worker (a persistent `MobSpawnerScript` instance — `ms_load`'s main work product) would land `shard_id=NULL`: the shards library's auto-stamp condition requires a tenant to be set, and the worker thread has none.
+
+Both commands wrap their pipeline callable with `preserve_tenant_context` from the shards library:
+
+```python
+try:
+    from evennia_shards import preserve_tenant_context
+except ImportError:
+    def preserve_tenant_context(fn):
+        return fn
+
+# ...
+
+run_async(
+    preserve_tenant_context(self._run_pipeline), query, flags,
+    at_return=self._on_async_return,
+    at_err=self._on_async_err,
+)
+```
+
+`preserve_tenant_context` captures the reactor thread's active tenant at wrap time and re-applies it inside the worker on entry — `MobSpawnerScript` rows created by `ms_load` get correctly stamped with whichever shard the process is running as. Mob population then scopes to the right shard via the auto-filter.
+
+## What happens without shards
+
+If `evennia-shards` is not installed, the top-of-module `try` import raises `ImportError` and the fallback identity function takes its place. `preserve_tenant_context(fn)` then returns `fn` unchanged. The commands run identically to a non-sharded deployment.
+
+No configuration to set, no settings flag to flip. The integration is structural — the optional import does its thing at module load time, and the wrap is a no-op in the non-sharded case.
+
+## What's guaranteed
+
+- **shards installed + configured** (e.g. `SHARDS_ROLE=shard, SHARD_ID=shard0`): `MobSpawnerScript` rows created by `ms_load` land `shard_id="shard0"`. Population maintenance scopes correctly to this shard's rooms.
+- **shards installed + monolith mode**: shards' `apps.py` returns early in monolith, so no tenant context is ever set. `preserve_tenant_context` captures `None`, the wrapped callable runs unscoped (same as if no shards were installed). No-op effectively.
+- **shards not installed**: the optional-import fallback applies. Mob-spawner behaves exactly as the standalone library — no DB-level partitioning, no shard stamping.
+
+## Mob-spawning ticks (separate concern)
+
+This compatibility note covers `ms_load` / `ms_validate`'s **build-time** writes. The persistent `MobSpawnerScript`'s **runtime** behaviour (periodic spawn ticks that create mob ObjectDB rows) runs on the reactor thread directly via Evennia's `at_repeat` / script scheduling — those execute under whatever tenant the script's process has set, no thread spawn involved. Mob rows spawned at runtime auto-stamp to the local shard via the normal `_tenant_aware_save` path. No additional integration needed for the runtime side.
+
+## Pattern source
+
+Same shape as [`evennia-world-builder`'s shards compatibility](https://github.com/FullCircleMUD/evennia-world-builder/blob/main/DESIGN/shards-compatibility.md). The pattern is documented as the canonical integration point in [`evennia-shards/DESIGN/tenancy.md`](https://github.com/FullCircleMUD/evennia-shards/blob/main/DESIGN/tenancy.md) under "Cross-thread tenant propagation."
