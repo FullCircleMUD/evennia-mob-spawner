@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Logging shim for evennia-mob-spawner.
 
-See DESIGN/logging.md for the design rationale. One public helper:
+See docs/logging.md for the design rationale. One public helper:
 
     ms_log(message, level="INFO")
 

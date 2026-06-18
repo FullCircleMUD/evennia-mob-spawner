@@ -44,4 +44,4 @@ This compatibility note covers `ms_load` / `ms_validate`'s **build-time** writes
 
 ## Pattern source
 
-Same shape as [`evennia-world-builder`'s shards compatibility](https://github.com/FullCircleMUD/evennia-world-builder/blob/main/DESIGN/shards-compatibility.md). The pattern is documented as the canonical integration point in [`evennia-shards/DESIGN/tenancy.md`](https://github.com/FullCircleMUD/evennia-shards/blob/main/DESIGN/tenancy.md) under "Cross-thread tenant propagation."
+Same shape as [`evennia-world-builder`'s shards compatibility](https://github.com/FullCircleMUD/evennia-world-builder/blob/main/docs/shards-compatibility.md). The pattern is documented as the canonical integration point in [`evennia-shards/docs/tenancy.md`](https://github.com/FullCircleMUD/evennia-shards/blob/main/docs/tenancy.md) under "Cross-thread tenant propagation."

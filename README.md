@@ -6,7 +6,7 @@ Spawn rules — what typeclass spawns where, how many, how often — are express
 
 ## Status
 
-**Pre-foundation.** Repository scaffold is in place; library code is not yet written. The next milestone is the rule schema and the persistent spawn-script lifecycle. See [DESIGN/progress.md](DESIGN/progress.md) for the running milestone log.
+**Pre-foundation.** Repository scaffold is in place; library code is not yet written. The next milestone is the rule schema and the persistent spawn-script lifecycle. See [docs/progress.md](docs/progress.md) for the running milestone log.
 
 ## Is this for me?
 
@@ -28,13 +28,13 @@ pip install git+https://github.com/FullCircleMUD/evennia-mob-spawner.git@main
 
 ## Compatibility with `evennia-shards`
 
-The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [DESIGN/shards-compatibility.md](DESIGN/shards-compatibility.md).
+The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [docs/shards-compatibility.md](docs/shards-compatibility.md).
 
 ## Learn more
 
 - **[CLAUDE.md](CLAUDE.md)** — load-bearing principles and orientation for working in the repository.
-- **[DESIGN/INDEX.md](DESIGN/INDEX.md)** — index of design documents.
-- **[DESIGN/architecture.md](DESIGN/architecture.md)** — the spawn system's mechanisms and the library / consumer ownership boundary; the first architectural pass.
+- **[docs/INDEX.md](docs/INDEX.md)** — index of design documents.
+- **[docs/architecture.md](docs/architecture.md)** — the spawn system's mechanisms and the library / consumer ownership boundary; the first architectural pass.
 
 ## License
 

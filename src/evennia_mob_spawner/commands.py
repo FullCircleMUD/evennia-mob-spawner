@@ -50,7 +50,7 @@ from evennia_yaml_reader import ReaderError
 # doesn't propagate across the ``run_async`` thread spawn. When the
 # shards library isn't installed, the import fails and we fall back
 # to an identity passthrough that's a no-op. See
-# ``evennia-shards/DESIGN/tenancy.md`` for the helper's contract.
+# ``evennia-shards/docs/tenancy.md`` for the helper's contract.
 try:
     from evennia_shards import preserve_tenant_context
 except ImportError:
