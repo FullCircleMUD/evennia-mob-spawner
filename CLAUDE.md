@@ -29,8 +29,6 @@ For any non-trivial task, start by reading in this order:
 1. [README.md](README.md) — what the project is, status, quick start.
 2. [docs/INDEX.md](docs/INDEX.md) — map of all design docs.
 3. [docs/architecture.md](docs/architecture.md) — high-level mapping of the spawn system's mechanisms and the library / consumer ownership boundary. Read this before adding to the library's surface area; it captures decisions already pinned and flags the open questions explicitly.
-4. [../LIBRARY_STANDARDS.md](../LIBRARY_STANDARDS.md) — cross-library conventions for everything under `FCM/libraries/`.
-
 ## Load-bearing architectural principles
 
 These are the principles every implementation decision must respect. Getting them wrong is expensive to undo.
@@ -111,4 +109,3 @@ When in doubt about a convention not covered here, look at how a sibling library
 
 - **[../evennia-world-builder/](../evennia-world-builder/)** — declarative YAML world authoring; partly implemented. Closest architectural cousin: same YAML/Reader/Validator pattern applied to static content.
 - **[../evennia-shards/](../evennia-shards/)** — split-deployment / sharding library; working MVP. Reference for the test-runner pattern, src layout, pyproject.toml shape.
-- **[../LIBRARY_STANDARDS.md](../LIBRARY_STANDARDS.md)** — cross-library conventions; authoritative for anything structural not specified in this CLAUDE.md.
