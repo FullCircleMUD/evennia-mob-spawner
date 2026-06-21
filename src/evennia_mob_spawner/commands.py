@@ -13,9 +13,9 @@ Conventions for any command shipping from mob-spawner:
 Currently shipped (architecture decision #7's full set):
 
 - ``ms_load``    — exercises the full pipeline (Reader → Definitions →
-                   Finder → Loader → Validator → Deployer). Spawn tick
-                   loop is a no-op stub at this stage; spawning behaviour
-                   lands in a follow-up implementation pass.
+                   Finder → Loader → Validator → Deployer) and upserts the
+                   persistent ``MobSpawnerScript`` whose tick loop maintains
+                   the population (observe → cooldown → spawn).
 - ``ms_stop``    — pause the ticker on matching scripts; state preserved.
 - ``ms_restart`` — kick the ticker on matching scripts without re-reading
                    YAML; state preserved (decision #18).
