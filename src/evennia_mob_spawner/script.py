@@ -447,8 +447,11 @@ class MobSpawnerScript(_BASE_SCRIPT):
           ``key`` + optional ``category``. Reserved categories (prefix
           ``mob_spawner_``) are refused at validation time.
         - Apply ``desc`` override if present.
-        - Apply ``attrs`` overrides via ``setattr`` (compatible with
-          Evennia's ``AttributeProperty`` descriptors).
+        - Apply ``attrs`` overrides via ``setattr`` — only persists if the
+          typeclass declares a matching ``AttributeProperty``; otherwise
+          ``setattr`` still runs (backward compatible) but sets a plain,
+          non-persisted attribute and a ``WARN`` is logged
+          (``_persists_as_attribute``).
         - Invoke ``mob.ms_at_post_spawn()`` if the typeclass defines it
           (decision #23) — exceptions inside the hook are caught and
           logged; the mob still exists.

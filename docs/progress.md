@@ -2,6 +2,18 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-08 — `attrs:` persistence check + WARN (`_persists_as_attribute`)
+
+Fixes a silent-failure class in `_spawn_one`'s `attrs:` application. `setattr(mob, attr_name, attr_val)` only persists past the current Python object if the typeclass declares `attr_name` as an `AttributeProperty` descriptor — without one, it sets a plain instance attribute that vanishes with the object, with no error and no log, ever. A rule could declare `attrs: {some_stat: 5}` and have it silently do nothing on every spawn, indefinitely.
+
+`_persists_as_attribute(obj, attr_name)` checks this via `inspect.getattr_static()` — plain `getattr()` was ruled out because Evennia's `AttributeProperty.__get__` doesn't special-case class-level access (`instance=None`); it raises internally, and a 3-arg `getattr(cls, name, None)` would silently swallow that and misreport "not declared." `getattr_static` inspects the MRO directly without invoking the descriptor protocol at all — the correct tool for this check.
+
+`_spawn_one`'s `attrs:` loop now calls the check before each `setattr()` and logs a `WARN` (rule id, attribute name, typeclass) when it won't persist — `setattr()` still runs regardless (backward compatible; no behaviour change), just now observable. See [logging.md](logging.md) and [architecture.md](architecture.md).
+
+Confirmed live against a real consumer bug: FCM's `Wolf` typeclass declared no `AttributeProperty` for `spawn_gold_max`/`spawn_resources_max`, so mob-spawner rules setting those via `attrs:` were silently no-ops on every spawn — wolves never carried the loot capacity the consumer's own spawn-distribution system needed to read. The new `WARN` fired correctly in production, naming exactly the missing attributes on exactly the right typeclass, confirming the diagnosis before the consumer fixed it typeclass-side.
+
+**204 tests green** (was 201, +3: `PersistsAsAttributeTest`, plus `test_attrs_applied_to_spawned_mob` extended to assert the `WARN` fires for its own non-persisting `attrs:` values, which it had been unknowingly exercising all along).
+
 ## 2026-05-17 — `_room_has_space` migrated, contract change complete
 
 `_room_has_space(room, rule)` now keys on the same `(file, rule_id)` identity tags as `_count_living`, completing the contract change started earlier today. The library's `max_per_room` enforcement is now truly per-rule: two rules sharing typeclass + area_tag cap their per-room populations independently rather than competing in one pool.

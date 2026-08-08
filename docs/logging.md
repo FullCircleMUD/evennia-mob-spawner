@@ -56,6 +56,7 @@ The shim is in place independently of which sites call it. Wiring decisions are 
 
 - **Spawn-time errors** (decision #14) — when `create_object` or a typeclass's `ms_at_post_spawn()` raises, the surrounding `try / except` logs the error with rule context. The tick continues; one bad rule doesn't take down the script.
 - **Empty `area_tag` queries** (decision #15) — pre-spawn check finds zero rooms matching the rule's `area_tag`. Logged once per occurrence with rule context. Useful for operator-side "why isn't this zone spawning?" debugging.
+- **Non-persisting `attrs:` overrides** — a rule's `attrs:` entry sets a value the typeclass has no matching `AttributeProperty` for. Logged once per entry per spawn, naming the rule, the attribute, and the typeclass. `setattr()` still runs for backward compatibility, but the value will not survive past the current object — this is the operator-visible signal for "why isn't this rule's loot/state actually landing?"
 - **Script lifecycle events** — load, restart, stop, delete. Includes drain timeouts (graceful stop didn't ack within 60s → force-stop fired) and any state-snapshot / state-restore events around the swap.
 - **Validator refusals** — every finding emitted when `ms_load` refuses to apply a malformed rule-set file. An authoring-mistake audit trail.
 - **Unexpected exceptions** from async pipelines — full traceback to `mob_spawner.log` instead of letting Twisted's `Failure` dump it into `server.log`.
