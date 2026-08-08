@@ -10,6 +10,7 @@ import time
 
 from django.conf import settings
 from django.test import TestCase, override_settings
+from evennia.typeclasses.attributes import AttributeProperty
 
 
 class EvenniaWorldTestCase(TestCase):
@@ -1922,16 +1923,38 @@ class TickLoopTest(EvenniaWorldTestCase):
         self.assertNotEqual(mob.location, ordinary)
 
     def test_attrs_applied_to_spawned_mob(self):
+        # DEFAULT_OBJECT (stock DefaultObject) declares neither "hp" nor
+        # "is_alpha" as an AttributeProperty, so setattr() below sets
+        # plain, non-persisted Python attributes — readable on this same
+        # live instance, but never actually written as Attributes. This
+        # is the exact shape of the real bug _persists_as_attribute's
+        # WARN exists to catch; assert both here rather than silently
+        # exercising it.
+        from unittest.mock import patch
+
+        captured = []
+
+        def fake_log(message, level="INFO"):
+            captured.append((message, level))
+
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(
-            self._basic_rule(attrs={"hp": 42, "is_alpha": True}),
-        )
-        script.at_repeat()
+        with patch("evennia_mob_spawner.script.ms_log", new=fake_log):
+            script = _TickLoopFixture.deploy_rule(
+                self._basic_rule(attrs={"hp": 42, "is_alpha": True}),
+            )
+            script.at_repeat()
+
         from evennia.objects.models import ObjectDB
         mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
-        # `setattr(mob, ...)` was applied; the attribute should be readable.
+        # setattr() was applied; readable on the live instance regardless
+        # of whether it actually persisted.
         self.assertEqual(getattr(mob, "hp", None), 42)
         self.assertEqual(getattr(mob, "is_alpha", None), True)
+
+        warnings = [m for m, lvl in captured if lvl == "WARN"]
+        self.assertEqual(len(warnings), 2)
+        self.assertTrue(any("attrs.hp" in m for m in warnings))
+        self.assertTrue(any("attrs.is_alpha" in m for m in warnings))
 
     def test_desc_override_applied(self):
         _TickLoopFixture.make_room("Test Room 1")
@@ -1993,6 +2016,43 @@ class TickLoopTest(EvenniaWorldTestCase):
         script.at_repeat()
         # The good rule did spawn its mob.
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+
+class _PersistsCheckFixture:
+    """Plain (non-Evennia) class for exercising ``_persists_as_attribute``.
+
+    A bare descriptor check, not a spawn — no DB, no typeclass, no
+    ``create_object``. ``AttributeProperty`` is a plain descriptor and
+    works on any class.
+    """
+
+    real_attr = AttributeProperty(0)
+    plain_attr = "not a descriptor"
+
+
+class PersistsAsAttributeTest(TestCase):
+    """``_persists_as_attribute`` — the setattr-will-it-stick check.
+
+    Guards the WARN in ``_spawn_one``'s attrs loop (decision: warn
+    when a rule's ``attrs:`` entry has no matching ``AttributeProperty``
+    and would silently vanish with the object).
+    """
+
+    def test_declared_attribute_property_returns_true(self):
+        from evennia_mob_spawner.script import _persists_as_attribute
+        obj = _PersistsCheckFixture()
+        self.assertTrue(_persists_as_attribute(obj, "real_attr"))
+
+    def test_plain_class_attribute_returns_false(self):
+        from evennia_mob_spawner.script import _persists_as_attribute
+        obj = _PersistsCheckFixture()
+        self.assertFalse(_persists_as_attribute(obj, "plain_attr"))
+
+    def test_undeclared_name_returns_false(self):
+        # Not a descriptor, not even a plain attribute — absent entirely.
+        from evennia_mob_spawner.script import _persists_as_attribute
+        obj = _PersistsCheckFixture()
+        self.assertFalse(_persists_as_attribute(obj, "does_not_exist_at_all"))
 
 
 class RaceProtocolTest(EvenniaWorldTestCase):

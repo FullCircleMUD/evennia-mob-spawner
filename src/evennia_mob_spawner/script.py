@@ -48,10 +48,12 @@ The tick loop:
       7. Save state — update `last_observed_count`, `spawned_last_tick`,
          `last_spawn_time` (if spawned).
 """
+import inspect
 import random
 import time
 
 from django.conf import settings
+from evennia.typeclasses.attributes import AttributeProperty
 from evennia.utils.utils import class_from_module
 
 from .config import get_area_tag_category, get_tick_seconds
@@ -75,6 +77,26 @@ _MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
 # produced it, and which rule-set file that rule lives in.
 _RULE_TAG_CATEGORY = "mob_spawner_rule"
 _FILE_TAG_CATEGORY = "mob_spawner_file"
+
+
+def _persists_as_attribute(obj, attr_name):
+    """Return True if ``setattr(obj, attr_name, ...)`` will persist.
+
+    ``setattr()`` only survives past the current Python object if
+    ``attr_name`` is backed by an ``AttributeProperty`` descriptor
+    somewhere in the typeclass's MRO — otherwise it silently sets a
+    plain instance attribute that vanishes with the object.
+
+    Uses ``inspect.getattr_static`` rather than plain ``getattr`` —
+    triggering the descriptor's own ``__get__`` at the class level
+    (``instance=None``) raises internally rather than returning the
+    descriptor, so a normal ``getattr(cls, name, None)`` would
+    silently (and incorrectly) report "not declared" via its default.
+    ``getattr_static`` inspects the MRO directly without invoking the
+    descriptor protocol at all.
+    """
+    descriptor = inspect.getattr_static(obj, attr_name, None)
+    return isinstance(descriptor, AttributeProperty)
 
 
 class MobSpawnerScript(_BASE_SCRIPT):
@@ -456,11 +478,22 @@ class MobSpawnerScript(_BASE_SCRIPT):
         if "desc" in rule:
             mob.db.desc = rule["desc"]
 
-        # Apply rule-level attribute overrides. setattr works with
-        # AttributeProperty descriptors on modern Evennia typeclasses
-        # (consumer pattern; see src/game CLAUDE.md note on
-        # AttributeProperty access).
+        # Apply rule-level attribute overrides. setattr only persists if
+        # the typeclass declares attr_name as an AttributeProperty —
+        # otherwise it silently sets a plain, non-persisted Python
+        # attribute that vanishes with the object (consumer pattern;
+        # see src/game CLAUDE.md note on AttributeProperty access).
+        # WARN when that's about to happen so a missing declaration is
+        # caught immediately rather than silently producing mobs that
+        # never carry their configured loot/state.
         for attr_name, attr_val in (rule.get("attrs") or {}).items():
+            if not _persists_as_attribute(mob, attr_name):
+                ms_log(
+                    f"{self.db_key}: rule_id={rule['rule_id']} sets "
+                    f"attrs.{attr_name} but {type(mob).__name__} has no "
+                    f"matching AttributeProperty — value will not persist",
+                    level="WARN",
+                )
             setattr(mob, attr_name, attr_val)
 
         # Optional ms_at_post_spawn() hook on the typeclass (decision #23).
