@@ -2,6 +2,8 @@
 
 The library is **compatible with [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) but does not require it**. The integration is a single optional import in [`commands.py`](../src/evennia_mob_spawner/commands.py) and a one-line wrap around each `run_async` dispatch.
 
+This document covers the tenant-context wrap only. The full picture of the pairing — the `shard` level mandate, the scope checks `ms_load` enforces, and the unsolved script-confinement problem — is in [interoperability.md](interoperability.md).
+
 ## What the integration does
 
 `ms_load` defers its pipeline to a Twisted worker thread via `evennia.utils.utils.run_async`. Under a multi-tenant `shards` deployment, the worker thread spawns with a fresh `threading.local` — the active tenant set on the reactor thread does not carry across. Without intervention, any `Script` row created inside the worker (a persistent `MobSpawnerScript` instance — `ms_load`'s main work product) would land `shard_id=NULL`: the shards library's auto-stamp condition requires a tenant to be set, and the worker thread has none.
@@ -40,7 +42,11 @@ No configuration to set, no settings flag to flip. The integration is structural
 
 ## Mob-spawning ticks (separate concern)
 
-This compatibility note covers `ms_load`'s **build-time** writes. (The standalone `ms-validate` CLI never touches the DB — it runs the pipeline read-only and needs no shards integration.) The persistent `MobSpawnerScript`'s **runtime** behaviour (periodic spawn ticks that create mob ObjectDB rows) runs on the reactor thread directly via Evennia's `at_repeat` / script scheduling — those execute under whatever tenant the script's process has set, no thread spawn involved. Mob rows spawned at runtime auto-stamp to the local shard via the normal `_tenant_aware_save` path. No additional integration needed for the runtime side.
+This compatibility note covers `ms_load`'s **build-time** writes. (The standalone `ms-validate` CLI never touches the DB — it runs the pipeline read-only and needs no shards integration.)
+
+The persistent `MobSpawnerScript`'s **runtime** behaviour needs no thread-context integration. Periodic spawn ticks run on the reactor thread directly via Evennia's `at_repeat` / script scheduling — no thread spawn involved — so mob rows auto-stamp to the local shard via the normal `_tenant_aware_save` path.
+
+That holds provided the script ticks on the shard that owns its rules. `ScriptDB` carries no `shard_id`, so the row is visible to every process and each attaches its own `LoopingCall`; nothing yet confines a rule set to its owning shard. Tracked as the open item in [interoperability.md](interoperability.md).
 
 ## Pattern source
 

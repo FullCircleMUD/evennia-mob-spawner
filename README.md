@@ -30,6 +30,8 @@ pip install git+https://github.com/FullCircleMUD/evennia-mob-spawner.git@main
 
 The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [docs/shards-compatibility.md](docs/shards-compatibility.md).
 
+Co-installed, the pairing also requires `shard` as the first declared level and confines `ms_load` to the shard it is running as. See [docs/interoperability.md](docs/interoperability.md).
+
 ## Learn more
 
 - **[CLAUDE.md](CLAUDE.md)** — load-bearing principles and orientation for working in the repository.

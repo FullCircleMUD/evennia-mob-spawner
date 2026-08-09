@@ -2,6 +2,18 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-09 — `ms_load` confined to its owning shard
+
+Diagnosed live: 41 of 216 spawned mobs carried `shard_id=NULL`, across 34 rooms that were themselves correctly stamped `shard0`. Cause is that `ScriptDB` carries no `shard_id`, so a `MobSpawnerScript` row is visible to every process and each attaches its own `LoopingCall` — the unscoped router was ticking rule sets it does not own, and `create_object` there skips the auto-stamp.
+
+This milestone closes the deploy half only. `ms_load` now refuses, before dispatch, when the process is not the one that owns the scope: `all` is refused on a sharded deployment, the query must start with `shard=`, and the named shard must match `get_shard_id()`. The router's `SHARD_ID` is mandated `"router"`, so it fails the match without needing a role check. A fourth check runs once `definitions.yaml` is parsed — `shard` must be the first declared level — which is the only enforcement of that mandate; a consumer keeping their own level names would otherwise pass every existing check.
+
+Detection is *installed **and** role is not `monolith`*, not merely that the import succeeded. Monolith is a non-sharded install, and all four checks no-op there exactly as they do standalone.
+
+The runtime half — confining a script's ticks to its owning shard — is unsolved and tracked in [interoperability.md](interoperability.md). `Script.stop()` is not the remedy: it writes `db_is_active=False` to the shared row and stops the script cluster-wide.
+
+Verified in-game on a live two-process deployment: all four refusals fired on the router and on a foreign shard, and `ms_load shard=shard1` deployed cleanly from shard1. **223 tests green** (was 204, +19 across `ActiveShardIdTest`, `CheckShardScopeTest`, `CheckShardLevelsTest`). Mirrored exactly in `evennia-world-builder`'s `wb_build`. See [interoperability.md](interoperability.md).
+
 ## 2026-08-08 — `attrs:` persistence check + WARN (`_persists_as_attribute`)
 
 Fixes a silent-failure class in `_spawn_one`'s `attrs:` application. `setattr(mob, attr_name, attr_val)` only persists past the current Python object if the typeclass declares `attr_name` as an `AttributeProperty` descriptor — without one, it sets a plain instance attribute that vanishes with the object, with no error and no log, ever. A rule could declare `attrs: {some_stat: 5}` and have it silently do nothing on every spawn, indefinitely.

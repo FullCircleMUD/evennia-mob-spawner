@@ -80,6 +80,80 @@ from .validator import Validator
 _ALL_TOKEN = "all"
 FORCE_VALIDATE_FLAG = "force-validate"
 
+SHARD_LEVEL = "shard"
+"""The level name that carries the shard id when co-installed with shards.
+
+Level names are otherwise consumer-chosen. This is the one naming rule the
+shards pairing imposes, and it is what lets ``ms_load`` tell which shard a
+rule set belongs to. See docs/interoperability.md.
+"""
+
+
+def active_shard_id() -> str | None:
+    """Return this process's shard id, or ``None`` if not sharded.
+
+    "Sharded" means the shards library is installed **and** the role is not
+    ``monolith`` — a successful import is not the test, because monolith is
+    a non-sharded install where no shard context is ever set. Returning
+    ``None`` is the signal for callers to skip every shard check and behave
+    exactly as they do standalone.
+    """
+    try:
+        from evennia_shards import ROLE_MONOLITH, get_role, get_shard_id
+    except ImportError:
+        return None
+
+    if get_role() == ROLE_MONOLITH:
+        return None
+    return get_shard_id()
+
+
+def check_shard_scope(query: dict) -> str | None:
+    """Return an operator-facing refusal, or ``None`` if the scope is fine.
+
+    Three refusals, all no-ops off a sharded deployment:
+
+    - the build-everything scope, which spans every shard's rule sets and so
+      can only ever be partly correct on one process;
+    - a query that doesn't name the shard level at all;
+    - a query naming a shard this process doesn't own. The router's
+      ``SHARD_ID`` is mandated to be ``"router"``, so this rejects ``ms_load``
+      there without needing a role check of its own.
+    """
+    shard_id = active_shard_id()
+    if shard_id is None:
+        return None
+
+    if not query:
+        return f"ms_load: `{_ALL_TOKEN}` is not available on a sharded deployment. Deploy one shard at a time."
+
+    if next(iter(query)) != SHARD_LEVEL:
+        return f"ms_load: the query must start with '{SHARD_LEVEL}='."
+
+    if query[SHARD_LEVEL] != shard_id:
+        return "ms_load: you can only run this from the shard it is installing on."
+
+    return None
+
+
+def check_shard_levels(definitions) -> str | None:
+    """Return a refusal if the shard level was never adopted, else ``None``.
+
+    Checked once ``definitions.yaml`` is parsed, because that is the first
+    point the declared levels are known. Nothing else catches this: a
+    consumer who co-installs shards but keeps their own level names has a
+    query that validates perfectly against their own declarations, so the
+    breach would otherwise surface only as a confusing "not a declared
+    level" error. No-op off a sharded deployment.
+    """
+    if active_shard_id() is None:
+        return None
+
+    levels = definitions.levels
+    if not levels or levels[0] != SHARD_LEVEL:
+        return f"ms_load: the first level in definitions.yaml must be '{SHARD_LEVEL}'."
+    return None
+
 
 def should_pre_validate(definitions: Definitions, flags: set) -> bool:
     """Decide whether ``ms_load`` should pre-validate the whole repo.
@@ -206,6 +280,12 @@ class CmdMsLoad(BaseCommand):
         ms_load shard=shard0 zone=millholm --force-validate
             Same, but pre-validate the whole repo first regardless of
             the gating setting.
+
+    On a sharded deployment (the shards library installed and the role
+    not ``monolith``), the first declared level must be ``shard`` and its
+    value must match the shard this process is running as — a rule set
+    can only be deployed from the process that owns it. ``ms_load all``
+    is refused there; deploy one shard at a time.
     """
 
     key = "ms_load"
@@ -227,6 +307,15 @@ class CmdMsLoad(BaseCommand):
             query, flags = _parse_args(args)
         except ValueError as e:
             self.caller.msg(f"ms_load: {e}")
+            return
+
+        # Refuse before dispatch on a sharded deployment: a rule set may
+        # only be deployed from the process that owns it. Synchronous so
+        # the refusal reaches the operator directly rather than through
+        # the async callbacks. No-op when not sharded.
+        refusal = check_shard_scope(query)
+        if refusal:
+            self.caller.msg(refusal)
             return
 
         # Hand the pipeline off to a worker thread. caller.msg() can't
@@ -289,6 +378,16 @@ class CmdMsLoad(BaseCommand):
             msg = f"ms_load: definitions.yaml is malformed: {e}"
             messages.append(msg)
             ms_log(msg, level="ERROR")
+            return messages
+
+        # The shard level can only be checked once definitions.yaml is
+        # parsed. Ahead of validate_query so a consumer who never adopted
+        # the mandate gets told that, rather than a generic "not a
+        # declared level" for the shard key they were required to pass.
+        refusal = check_shard_levels(definitions)
+        if refusal:
+            messages.append(refusal)
+            ms_log(refusal, level="ERROR")
             return messages
 
         try:

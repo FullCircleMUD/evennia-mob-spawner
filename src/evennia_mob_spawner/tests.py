@@ -6,7 +6,10 @@ the evennia-yaml-reader dependency is wired up. Real tests land alongside
 the spawn-rule pipeline as it is built out.
 """
 
+import sys
 import time
+import types
+from unittest import mock
 
 from django.conf import settings
 from django.test import TestCase, override_settings
@@ -47,7 +50,14 @@ from evennia_mob_spawner.errors import (
     LoaderMissingEntryError,
     LoaderMissingIndexError,
 )
-from evennia_mob_spawner.commands import FORCE_VALIDATE_FLAG, should_pre_validate
+from evennia_mob_spawner.commands import (
+    FORCE_VALIDATE_FLAG,
+    SHARD_LEVEL,
+    active_shard_id,
+    check_shard_levels,
+    check_shard_scope,
+    should_pre_validate,
+)
 from evennia_mob_spawner.finder import Finder, FoundLocation
 from evennia_mob_spawner.loader import Loader, LoadResult
 from evennia_mob_spawner.validator import LoadedRule, Validator
@@ -508,6 +518,170 @@ class ShouldPreValidateTest(TestCase):
         self.assertFalse(should_pre_validate(
             self._defs(repo_ci=True), flags={"verbose", "dry-run"},
         ))
+
+
+def _fake_shards(role: str, shard_id):
+    """A stand-in ``evennia_shards`` exposing only what the gate imports.
+
+    The library's own test venv deliberately has no shards install, so the
+    co-installed paths are exercised by injecting this into ``sys.modules``.
+    """
+    mod = types.ModuleType("evennia_shards")
+    mod.ROLE_MONOLITH = "monolith"
+    mod.get_role = lambda: role
+    mod.get_shard_id = lambda: shard_id
+    return mod
+
+
+class ActiveShardIdTest(TestCase):
+    """Detection: installed *and* not monolith, not merely importable."""
+
+    def test_shards_not_installed_is_not_sharded(self):
+        # A None entry in sys.modules makes the import raise, which is the
+        # standalone case: no shards, no checks.
+        with mock.patch.dict(sys.modules, {"evennia_shards": None}):
+            self.assertIsNone(active_shard_id())
+
+    def test_monolith_role_is_not_sharded(self):
+        # Monolith is a non-sharded install — the import succeeding is not
+        # enough, or the library would start refusing scopes on a game that
+        # has no shards at all.
+        fake = _fake_shards(role="monolith", shard_id=None)
+        with mock.patch.dict(sys.modules, {"evennia_shards": fake}):
+            self.assertIsNone(active_shard_id())
+
+    def test_shard_role_reports_its_shard_id(self):
+        fake = _fake_shards(role="shard", shard_id="shard0")
+        with mock.patch.dict(sys.modules, {"evennia_shards": fake}):
+            self.assertEqual(active_shard_id(), "shard0")
+
+    def test_router_role_reports_its_own_id(self):
+        # The router is "sharded" for gate purposes: it has an id, and that
+        # id never matches a content shard, which is what refuses ms_load
+        # there without a role check of its own.
+        fake = _fake_shards(role="router", shard_id="router")
+        with mock.patch.dict(sys.modules, {"evennia_shards": fake}):
+            self.assertEqual(active_shard_id(), "router")
+
+
+class CheckShardScopeTest(TestCase):
+    """The ms_load shard gate. Every refusal is a no-op off a shard."""
+
+    def _as(self, shard_id):
+        return mock.patch(
+            "evennia_mob_spawner.commands.active_shard_id",
+            return_value=shard_id,
+        )
+
+    # --- not a sharded deployment: nothing is refused ----------------
+
+    def test_unsharded_allows_all_scope(self):
+        with self._as(None):
+            self.assertIsNone(check_shard_scope({}))
+
+    def test_unsharded_allows_any_query(self):
+        # Including one naming a shard level, which is just an ordinary
+        # consumer-chosen level name when shards isn't in play.
+        with self._as(None):
+            self.assertIsNone(check_shard_scope({SHARD_LEVEL: "shard9"}))
+            self.assertIsNone(check_shard_scope({"zone": "millholm"}))
+
+    # --- sharded: the three refusals ---------------------------------
+
+    def test_all_scope_refused_when_sharded(self):
+        with self._as("shard0"):
+            refusal = check_shard_scope({})
+        self.assertIsNotNone(refusal)
+        self.assertIn("one shard at a time", refusal)
+
+    def test_query_not_starting_with_shard_refused(self):
+        # The mandate makes shard the first level, so a valid query always
+        # leads with it. Refused synchronously here rather than waiting for
+        # validate_query in the worker.
+        with self._as("shard0"):
+            refusal = check_shard_scope({"zone": "millholm"})
+        self.assertIsNotNone(refusal)
+        self.assertIn(SHARD_LEVEL, refusal)
+
+    def test_shard_present_but_not_first_refused(self):
+        # Ordering matters: the query must *start* with shard, not merely
+        # mention it somewhere.
+        with self._as("shard0"):
+            refusal = check_shard_scope({"zone": "millholm", SHARD_LEVEL: "shard0"})
+        self.assertIsNotNone(refusal)
+
+    def test_foreign_shard_refused(self):
+        with self._as("shard0"):
+            refusal = check_shard_scope({SHARD_LEVEL: "shard1"})
+        self.assertIsNotNone(refusal)
+
+    def test_router_refused_for_content_shard(self):
+        # The load-bearing case: deploying shard0's rules from the router
+        # is what produced unstamped mobs.
+        with self._as("router"):
+            self.assertIsNotNone(check_shard_scope({SHARD_LEVEL: "shard0"}))
+
+    def test_refusals_name_no_specific_shard(self):
+        # Messages are generic by decision: interpolating shard ids led to
+        # advice like `ms_load shard=router`, a command that cannot work.
+        with self._as("shard0"):
+            for query in ({}, {"zone": "x"}, {SHARD_LEVEL: "shard1"}):
+                refusal = check_shard_scope(query)
+                self.assertNotIn("shard0", refusal)
+                self.assertNotIn("shard1", refusal)
+
+    # --- sharded: the allowed case -----------------------------------
+
+    def test_own_shard_allowed(self):
+        with self._as("shard0"):
+            self.assertIsNone(check_shard_scope({SHARD_LEVEL: "shard0"}))
+
+    def test_own_shard_allowed_with_deeper_scope(self):
+        with self._as("shard0"):
+            self.assertIsNone(check_shard_scope({
+                SHARD_LEVEL: "shard0", "zone": "millholm", "file": "town",
+            }))
+
+
+class CheckShardLevelsTest(TestCase):
+    """The mandate check: definitions.yaml must declare `shard` first."""
+
+    def _defs(self, levels):
+        return Definitions.from_dict({"levels": list(levels)})
+
+    def _as(self, shard_id):
+        return mock.patch(
+            "evennia_mob_spawner.commands.active_shard_id",
+            return_value=shard_id,
+        )
+
+    def test_unsharded_accepts_any_levels(self):
+        # Level names are consumer-chosen off a sharded deployment.
+        with self._as(None):
+            self.assertIsNone(check_shard_levels(self._defs(["zone", "area"])))
+
+    def test_shard_first_accepted(self):
+        with self._as("shard0"):
+            self.assertIsNone(
+                check_shard_levels(self._defs([SHARD_LEVEL, "zone", "file"]))
+            )
+
+    def test_mandate_not_adopted_refused(self):
+        # The case nothing else catches: this query would validate cleanly
+        # against the consumer's own declared levels.
+        with self._as("shard0"):
+            refusal = check_shard_levels(self._defs(["zone", "area"]))
+        self.assertIsNotNone(refusal)
+        self.assertIn(SHARD_LEVEL, refusal)
+
+    def test_shard_declared_but_not_first_refused(self):
+        with self._as("shard0"):
+            refusal = check_shard_levels(self._defs(["zone", SHARD_LEVEL]))
+        self.assertIsNotNone(refusal)
+
+    def test_no_levels_declared_refused(self):
+        with self._as("shard0"):
+            self.assertIsNotNone(check_shard_levels(self._defs([])))
 
 
 _VALID_RULE = {
