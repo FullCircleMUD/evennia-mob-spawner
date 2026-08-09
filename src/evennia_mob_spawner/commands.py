@@ -57,7 +57,12 @@ except ImportError:
     def preserve_tenant_context(fn):
         return fn
 
-from .config import get_configured_reader
+from .config import (
+    SHARD_LEVEL,
+    active_shard_id,
+    get_configured_reader,
+    is_shard_process,
+)
 from .definitions import Definitions
 from .deployer import Deployer
 from .errors import (
@@ -80,60 +85,74 @@ from .validator import Validator
 _ALL_TOKEN = "all"
 FORCE_VALIDATE_FLAG = "force-validate"
 
-SHARD_LEVEL = "shard"
-"""The level name that carries the shard id when co-installed with shards.
 
-Level names are otherwise consumer-chosen. This is the one naming rule the
-shards pairing imposes, and it is what lets ``ms_load`` tell which shard a
-rule set belongs to. See docs/interoperability.md.
-"""
-
-
-def active_shard_id() -> str | None:
-    """Return this process's shard id, or ``None`` if not sharded.
-
-    "Sharded" means the shards library is installed **and** the role is not
-    ``monolith`` — a successful import is not the test, because monolith is
-    a non-sharded install where no shard context is ever set. Returning
-    ``None`` is the signal for callers to skip every shard check and behave
-    exactly as they do standalone.
-    """
-    try:
-        from evennia_shards import ROLE_MONOLITH, get_role, get_shard_id
-    except ImportError:
-        return None
-
-    if get_role() == ROLE_MONOLITH:
-        return None
-    return get_shard_id()
-
-
-def check_shard_scope(query: dict) -> str | None:
+def check_shard_scope(query: dict, command_key: str = "ms_load") -> str | None:
     """Return an operator-facing refusal, or ``None`` if the scope is fine.
 
     Three refusals, all no-ops off a sharded deployment:
 
-    - the build-everything scope, which spans every shard's rule sets and so
-      can only ever be partly correct on one process;
+    - the whole-world scope, which spans every shard's rule sets and so can
+      only ever be partly correct on one process;
     - a query that doesn't name the shard level at all;
     - a query naming a shard this process doesn't own. The router's
-      ``SHARD_ID`` is mandated to be ``"router"``, so this rejects ``ms_load``
-      there without needing a role check of its own.
+      ``SHARD_ID`` is mandated to be ``"router"``, so this rejects the
+      command there without needing a role check of its own.
+
+    Applies to any command whose effect is confined to the process running
+    it. Deploying is one such: ``ms_load`` only reaches this process's
+    scripts. So is anything touching a script's live ``ndb._task``, which
+    exists only where the script runs — a broad scope there would stop or
+    remove one shard's share while reporting a clean sweep of all of them.
     """
     shard_id = active_shard_id()
     if shard_id is None:
         return None
 
     if not query:
-        return f"ms_load: `{_ALL_TOKEN}` is not available on a sharded deployment. Deploy one shard at a time."
+        return (
+            f"{command_key}: `{_ALL_TOKEN}` is not available on a sharded "
+            f"deployment. Run this one shard at a time."
+        )
 
     if next(iter(query)) != SHARD_LEVEL:
-        return f"ms_load: the query must start with '{SHARD_LEVEL}='."
+        return f"{command_key}: the query must start with '{SHARD_LEVEL}='."
 
     if query[SHARD_LEVEL] != shard_id:
-        return "ms_load: you can only run this from the shard it is installing on."
+        return f"{command_key}: you can only run this from the shard it acts on."
 
     return None
+
+
+def check_cluster_wide_scope(command_key: str) -> str | None:
+    """Refuse a whole-world command on a process that can only see part of it.
+
+    Some commands answer a question about the entire world rather than about
+    one shard's slice. Under the tenancy auto-filter a shard process sees
+    only its own rows, so the answer it produces is not a partial answer
+    flagged as such — it is a confident, wrongly-scoped one. A shard
+    reporting on another shard's script counts zero of a live population.
+
+    **Why this collapses to "refuse only on a shard".** There are three
+    roles, and only one of them narrows the ORM:
+
+    - *router* — runs unscoped, so it sees every shard's rows plus any
+      orphaned ones. The only process that can answer for the whole world.
+    - *monolith* — a non-sharded install by definition; no shard context is
+      ever set, and the single process is the whole world.
+    - *shards not installed* — no auto-filter exists at all.
+
+    So rather than enumerating "router or monolith or standalone", the check
+    is the single negative case: this process is a shard. Anything else can
+    see the whole world, whether because it is unscoped or because there is
+    only one world to see.
+    """
+    if not is_shard_process():
+        return None
+
+    return (
+        f"{command_key}: reports across the whole world, so it can only be "
+        f"run from the router."
+    )
 
 
 def check_shard_levels(definitions) -> str | None:
@@ -623,6 +642,32 @@ class _MsOperateBase(BaseCommand):
     help_category = "Mob Spawner"
     op_label = "op"
 
+    cluster_wide_only = False
+    """Set on subclasses whose answer covers the whole world, not one shard.
+
+    Such a command is refused on a shard process — see
+    :func:`check_cluster_wide_scope`.
+    """
+
+    shard_scoped = False
+    """Set on subclasses whose effect stops at the process running them.
+
+    Evennia keeps a script's ``LoopingCall`` in ``ndb._task``, which exists
+    only in the process running it, so an operation reaching for that task
+    can only act on this shard's share:
+
+    - ``pause()`` reads ``ndb._task`` and, finding none, writes nothing at
+      all — run from elsewhere it silently does nothing while reporting
+      success.
+    - ``delete()`` stops only the local task before removing the shared
+      row, leaving the owning shard ticking a script that no longer exists.
+
+    So these carry the same scope gate as ``ms_load``: the whole-world
+    scope is refused, and the query must name this shard. Stopping "all"
+    from one shard would halt its own scripts while every other shard kept
+    ticking — a partial action reported as a complete one.
+    """
+
     def func(self):
         args = (self.args or "").strip()
         if not args:
@@ -632,11 +677,23 @@ class _MsOperateBase(BaseCommand):
             )
             return
 
+        if self.cluster_wide_only:
+            refusal = check_cluster_wide_scope(self.key)
+            if refusal:
+                self.caller.msg(refusal)
+                return
+
         try:
             query, flags = _parse_args(args)
         except ValueError as e:
             self.caller.msg(f"{self.key}: {e}")
             return
+
+        if self.shard_scoped:
+            refusal = check_shard_scope(query, self.key)
+            if refusal:
+                self.caller.msg(refusal)
+                return
 
         # Reader is needed only when the query is non-empty (manifest
         # walk). For `all`, we go straight to the DB.
@@ -736,6 +793,9 @@ class CmdMsStop(_MsOperateBase):
     key = "ms_stop"
     op_label = "stop"
 
+    # pause() acts on ndb._task, which exists only where the script runs.
+    shard_scoped = True
+
     def apply(self, script, messages: list) -> None:
         state = _script_state(script)
         if state != "active":
@@ -760,6 +820,9 @@ class CmdMsRestart(_MsOperateBase):
 
     key = "ms_restart"
     op_label = "restart"
+
+    # unpause() and start() both attach ndb._task on the calling process.
+    shard_scoped = True
 
     def apply(self, script, messages: list) -> None:
         state = _script_state(script)
@@ -795,6 +858,9 @@ class CmdMsDelete(_MsOperateBase):
 
     key = "ms_delete"
     op_label = "delete"
+
+    # delete() stops only the local task before removing the shared row.
+    shard_scoped = True
 
     def apply(self, script, messages: list) -> None:
         key = script.db_key
@@ -862,6 +928,12 @@ class CmdMsSpawnReport(_MsOperateBase):
 
     key = "ms_spawn_report"
     op_label = "report"
+
+    # A census of the whole world, not of one shard's slice. On a shard the
+    # auto-filter would silently narrow the counts — a shard reporting on
+    # another shard's script counts zero of a live population. The router
+    # sees every row, including any left unstamped.
+    cluster_wide_only = True
 
     def apply(self, script, messages: list) -> None:
         state = _script_state(script)

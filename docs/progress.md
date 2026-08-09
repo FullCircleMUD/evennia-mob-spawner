@@ -2,6 +2,23 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-09 — scripts stamped with their owning shard; commands gated to where they can act
+
+Closes the runtime half left open by the entry below. The Deployer now stamps the shards library's `owning_shard` Attribute on every script it creates or upserts, and shards confines the ticks to that process. Inferring the owner is safe because `ms_load` already refuses to run anywhere but the owning shard. Nothing is stamped off a sharded deployment, and an unstamped script stays unconfined.
+
+The command surface was then worked through one at a time, because the failure modes differ and all of them are quiet:
+
+- `ms_stop` from a foreign process writes **nothing at all** — `pause()` reads the local `ndb._task`, finds none, and skips every DB write — while still reporting success.
+- `ms_delete` removes the shared row after stopping only the local task, leaving the owning shard ticking a script that no longer exists.
+- `ms_restart` attaches `ndb._task` on whichever process runs it.
+- A whole-world scope on any of these acts on one shard's share and reports a clean sweep of every shard's.
+
+So `ms_stop`, `ms_restart` and `ms_delete` now carry the same gate as `ms_load`. `ms_spawn_report` is gated the opposite way — its census counts through `ObjectDB` under the auto-filter, so only an unscoped process can answer for the whole world; it is refused on a shard and allowed everywhere else. `ms_status` is deliberately left ungated: it derives state from shared row fields alone, so it is correct anywhere and useful from the router as a cluster view.
+
+Verified in-game on a live two-process deployment, then confirmed by instrumented guard logs across repeated restarts in varying boot orders — including a second shard reclaiming its own script while refusing the first's.
+
+**232 tests green** (was 223). See [interoperability.md](interoperability.md) for the command table and the reasoning behind each gate.
+
 ## 2026-08-09 — `ms_load` confined to its owning shard
 
 Diagnosed live: 41 of 216 spawned mobs carried `shard_id=NULL`, across 34 rooms that were themselves correctly stamped `shard0`. Cause is that `ScriptDB` carries no `shard_id`, so a `MobSpawnerScript` row is visible to every process and each attaches its own `LoopingCall` — the unscoped router was ticking rule sets it does not own, and `create_object` there skips the auto-stamp.

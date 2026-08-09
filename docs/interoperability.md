@@ -25,30 +25,57 @@ outright if `shard` is not the first declared level. Nothing else catches that �
 co-installs shards but keeps their own level names has queries that validate cleanly against their own
 declarations.
 
-`ms_load` then requires the query to *start* with `shard=`, and compares its value against
-`get_shard_id()`, refusing when they differ — so a rule set can only be deployed from the process that
-owns it. The router's `SHARD_ID` is mandated to be `"router"`, so this rejects `ms_load` on the router
-without needing a role check.
-
-**`ms_load all` is refused when shards is installed.** The empty query means load-everything, which
-spans every shard's files and so can only ever be partly correct on a single process. Rather than
-silently narrowing the scope, the command refuses and tells the operator to deploy one shard at a
-time.
-
 **Monolith counts as a non-sharded install.** The gate is *shards installed **and** role is not
 `monolith`* — not merely that the import succeeded. Under `monolith` there is no shard context and
-`get_shard_id()` returns `None`, so both the shard-match check and the `ms_load all` refusal are
-skipped and the library behaves exactly as it does standalone.
+`get_shard_id()` returns `None`, so every check below is skipped and the library behaves exactly as it
+does standalone.
 
-**`ScriptDB` is not tenant-scoped.** A `MobSpawnerScript` row is a single row visible to every process,
-and each process attaches its own `LoopingCall` to it — so one rule set can tick on a process that does
-not own it. On the router, which runs unscoped, `create_object` then inserts with `shard_id=NULL` and
-the mobs are invisible to the shard whose rooms they occupy. `Script.stop()` is not a remedy: it writes
-`db_is_active=False` to the shared row, stopping the script cluster-wide.
+### Commands are gated to the process they can act on
 
-[TBD — needs discussion: how a spawner script is confined to the shard that owns it. The constraint is
-shards' (`ScriptDB` carries no `shard_id`; see its `docs/interoperability.md`), but the confinement
-mechanism is this library's, since it owns the script's lifecycle and knows its shard.]
+A command's effect usually stops at the process running it, either because it writes rows this process
+can see, or because it reaches for a script's live `ndb._task`, which exists only where the script
+runs. Four commands therefore carry the same scope gate: the whole-world scope is refused, the query
+must start with `shard=`, and it must name this shard.
+
+| Command | Gate | Why |
+|---|---|---|
+| `ms_load` | shard-scoped | deploys into this process only |
+| `ms_stop` | shard-scoped | `pause()` reads the local `ndb._task` |
+| `ms_restart` | shard-scoped | `unpause()` / `start()` attach locally |
+| `ms_delete` | shard-scoped | stops only the local task, then removes the shared row |
+| `ms_spawn_report` | cluster-wide only | counts under the auto-filter; correct only unscoped |
+| `ms_status` | none | reads shared row fields, so it is correct anywhere |
+
+The failure modes the gates prevent differ, and are worth naming because they are all quiet. `ms_stop`
+from a foreign process writes nothing at all and still reports success. `ms_delete` removes the shared
+row while the owning shard keeps ticking a script that no longer exists. A whole-world `ms_stop` halts
+one shard's share and reports a clean sweep of every shard's.
+
+`ms_spawn_report` is gated the other way. Its census counts through `ObjectDB`, so on a shard the
+auto-filter narrows it — a shard reporting on another shard's script counts zero of a live population.
+The router runs unscoped and is the only process that can answer for the whole world, including rows
+left unstamped, so the command is refused only on a shard. The check collapses to that single case
+because the router, monolith and standalone all see everything already.
+
+`ms_status` is deliberately ungated: it derives state from shared row fields alone, so it returns the
+same answer everywhere and is useful from the router as a cluster-wide view. Its absence from the
+gated set is a decision, not an oversight.
+
+### Scripts are confined to the shard that owns them
+
+`ScriptDB` is not tenant-scoped, so a `MobSpawnerScript` row is visible to every process and each
+attaches its own `LoopingCall`. Left alone, a rule set ticks on processes that do not own it — and on
+the unscoped router `create_object` inserts with `shard_id=NULL`, leaving mobs invisible to the shard
+whose rooms they occupy. This is what produced 41 unstamped mobs on a live deployment.
+
+The Deployer stamps the shards library's `owning_shard` Attribute on every script it creates or
+upserts, and shards confines the ticks. The stamp is safe to infer because `ms_load` already refuses to
+run anywhere but the owning shard: whichever shard the deploy happens on *is* the owner. Nothing is
+stamped off a sharded deployment, and an unstamped script is unconfined — correct, because the only way
+to be unstamped is to have been created where sharding wasn't in play.
+
+The confinement mechanism, and why it survives any boot order, is documented in
+[shards' `shard-owned-scripts.md`](../../evennia-shards/docs/shard-owned-scripts.md).
 
 ## evennia-targeting
 

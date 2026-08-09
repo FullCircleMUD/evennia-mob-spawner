@@ -81,3 +81,51 @@ def get_configured_reader():
     reader_class = get_reader_class()
     kwargs = getattr(settings, "MOB_SPAWNER_READER_KWARGS", {}) or {}
     return reader_class(**kwargs)
+
+
+SHARD_LEVEL = "shard"
+"""The level name that carries the shard id when co-installed with shards.
+
+Level names are otherwise consumer-chosen. This is the one naming rule the
+shards pairing imposes, and it is what lets ``ms_load`` tell which shard a
+rule set belongs to. See docs/interoperability.md.
+"""
+
+
+def active_shard_id() -> str | None:
+    """Return this process's shard id, or ``None`` if not sharded.
+
+    "Sharded" means the shards library is installed **and** the role is not
+    ``monolith`` — a successful import is not the test, because monolith is
+    a non-sharded install where no shard context is ever set. Returning
+    ``None`` is the signal for callers to skip every shard check and behave
+    exactly as they do standalone.
+    """
+    try:
+        from evennia_shards import ROLE_MONOLITH, get_role, get_shard_id
+    except ImportError:
+        return None
+
+    if get_role() == ROLE_MONOLITH:
+        return None
+    return get_shard_id()
+
+
+def is_shard_process() -> bool:
+    """True only when this process is a shard.
+
+    Distinct from :func:`active_shard_id`, which answers "is sharding in
+    play at all". This answers "is this process's ORM narrowed to one
+    shard's rows" — the condition that makes a cluster-wide question
+    unanswerable here.
+
+    False for the router (runs unscoped), for monolith (a non-sharded
+    install — no shard context is ever set), and when shards isn't
+    installed (no filter exists). See docs/interoperability.md.
+    """
+    try:
+        from evennia_shards import ROLE_SHARD, get_role
+    except ImportError:
+        return False
+
+    return get_role() == ROLE_SHARD

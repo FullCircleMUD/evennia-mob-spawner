@@ -54,6 +54,7 @@ from evennia_mob_spawner.commands import (
     FORCE_VALIDATE_FLAG,
     SHARD_LEVEL,
     active_shard_id,
+    check_cluster_wide_scope,
     check_shard_levels,
     check_shard_scope,
     should_pre_validate,
@@ -641,6 +642,40 @@ class CheckShardScopeTest(TestCase):
             self.assertIsNone(check_shard_scope({
                 SHARD_LEVEL: "shard0", "zone": "millholm", "file": "town",
             }))
+
+
+class CheckClusterWideScopeTest(TestCase):
+    """Whole-world commands are refused on a shard, and only on a shard."""
+
+    def _role(self, role):
+        return mock.patch(
+            "evennia_mob_spawner.commands.is_shard_process",
+            return_value=(role == "shard"),
+        )
+
+    def test_shard_is_refused(self):
+        # The only role whose ORM is narrowed — its census would be a
+        # confident count of the wrong world.
+        with self._role("shard"):
+            refusal = check_cluster_wide_scope("ms_spawn_report")
+        self.assertIsNotNone(refusal)
+        self.assertIn("router", refusal)
+
+    def test_router_is_allowed(self):
+        # Runs unscoped, so it is the only process that can answer for the
+        # whole world — including rows left unstamped.
+        with self._role("router"):
+            self.assertIsNone(check_cluster_wide_scope("ms_spawn_report"))
+
+    def test_monolith_is_allowed(self):
+        # A non-sharded install: the single process is the whole world.
+        with self._role("monolith"):
+            self.assertIsNone(check_cluster_wide_scope("ms_spawn_report"))
+
+    def test_standalone_is_allowed(self):
+        # shards not installed — no auto-filter exists to narrow anything.
+        with self._role(None):
+            self.assertIsNone(check_cluster_wide_scope("ms_spawn_report"))
 
 
 class CheckShardLevelsTest(TestCase):
@@ -2906,3 +2941,58 @@ class RoomHasSpaceContractTest(EvenniaWorldTestCase):
             _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1,
         )
 
+
+
+class CommandScopeGateTest(TestCase):
+    """Which gate each command carries, and why it carries it."""
+
+    def _cmds(self):
+        from evennia_mob_spawner.commands import (
+            CmdMsDelete,
+            CmdMsRestart,
+            CmdMsSpawnReport,
+            CmdMsStatus,
+            CmdMsStop,
+        )
+        return CmdMsStop, CmdMsDelete, CmdMsRestart, CmdMsStatus, CmdMsSpawnReport
+
+    def test_commands_touching_the_live_task_are_shard_scoped(self):
+        # pause() and delete() both reach for ndb._task, which exists only
+        # in the process running the script — so a broad scope would act on
+        # this shard's share while reporting a clean sweep of all of them.
+        stop, delete, restart, status, report = self._cmds()
+        for cmd in (stop, delete, restart):
+            self.assertTrue(cmd.shard_scoped, f"{cmd.key} should be shard-scoped")
+
+    def test_read_only_commands_are_not_shard_scoped(self):
+        # ms_status reads shared row fields, so it is correct anywhere.
+        # ms_spawn_report carries the cluster-wide gate instead.
+        _stop, _delete, _restart, status, report = self._cmds()
+        self.assertFalse(status.shard_scoped)
+        self.assertFalse(report.shard_scoped)
+
+    def test_only_the_census_is_cluster_wide(self):
+        stop, delete, restart, status, report = self._cmds()
+        self.assertTrue(report.cluster_wide_only)
+        for cmd in (stop, delete, restart, status):
+            self.assertFalse(cmd.cluster_wide_only)
+
+    def test_refusal_names_the_invoking_command(self):
+        # The gate is shared, so its messages must not hardcode ms_load.
+        with mock.patch(
+            "evennia_mob_spawner.commands.active_shard_id", return_value="shard0"
+        ):
+            self.assertIn("ms_stop", check_shard_scope({}, "ms_stop"))
+            self.assertIn(
+                "ms_delete", check_shard_scope({"zone": "x"}, "ms_delete")
+            )
+            self.assertIn(
+                "ms_delete",
+                check_shard_scope({SHARD_LEVEL: "shard1"}, "ms_delete"),
+            )
+
+    def test_default_command_key_is_ms_load(self):
+        with mock.patch(
+            "evennia_mob_spawner.commands.active_shard_id", return_value="shard0"
+        ):
+            self.assertIn("ms_load", check_shard_scope({}))
