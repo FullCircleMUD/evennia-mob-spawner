@@ -75,7 +75,7 @@ stamped off a sharded deployment, and an unstamped script is unconfined — corr
 to be unstamped is to have been created where sharding wasn't in play.
 
 The confinement mechanism, and why it survives any boot order, is documented in
-[shards' `shard-owned-scripts.md`](../../evennia-shards/docs/shard-owned-scripts.md).
+[shards' `script-confinement.md`](../../evennia-shards/docs/script-confinement.md).
 
 ## evennia-targeting
 
