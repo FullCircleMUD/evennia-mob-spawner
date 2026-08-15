@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "evennia-mob-spawner"
-version = "0.0.1"
+version = "0.1.0"
 description = "Declarative YAML-driven mob spawn system for Evennia"
 readme = "README.md"
 license = {text = "BSD-3-Clause"}

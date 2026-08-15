@@ -6,7 +6,7 @@ Spawn rules — what typeclass spawns where, how many, how often — are express
 
 ## Status
 
-**Pre-foundation.** Repository scaffold is in place; library code is not yet written. The next milestone is the rule schema and the persistent spawn-script lifecycle. See [docs/progress.md](docs/progress.md) for the running milestone log.
+**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. 232 tests green, live-verified on a two-process sharded deployment against a real consumer game. See [docs/progress.md](docs/progress.md) for the running milestone log.
 
 ## Is this for me?
 
@@ -20,10 +20,19 @@ If your game's mob spawning is a few hand-coded scripts that rarely change, you 
 
 ## Install
 
-The package is not on PyPI yet. Install directly from git:
+```
+pip install evennia-mob-spawner
+```
+
+Editable install for development against a checkout:
 
 ```
-pip install git+https://github.com/FullCircleMUD/evennia-mob-spawner.git@main
+git clone https://github.com/FullCircleMUD/evennia-mob-spawner.git
+cd evennia-mob-spawner
+python -m venv venv
+# Activate the venv (platform-specific)
+pip install -e .
+python runtests.py
 ```
 
 ## Compatibility with `evennia-shards`

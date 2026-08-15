@@ -110,7 +110,7 @@ SCAFFOLD = {
 
 class PackageSmokeTest(TestCase):
     def test_version_present(self):
-        self.assertEqual(evennia_mob_spawner.__version__, "0.0.1")
+        self.assertEqual(evennia_mob_spawner.__version__, "0.1.0")
 
 
 class LogShimSmokeTest(TestCase):
