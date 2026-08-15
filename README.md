@@ -6,7 +6,7 @@ Spawn rules — what typeclass spawns where, how many, how often — are express
 
 ## Status
 
-**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. 232 tests green, live-verified on a two-process sharded deployment against a real consumer game. See [docs/progress.md](docs/progress.md) for the running milestone log.
+**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. 232 tests green, live-verified on a two-process sharded deployment against a real consumer game. See [docs/progress.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/progress.md) for the running milestone log.
 
 ## Is this for me?
 
@@ -37,16 +37,16 @@ python runtests.py
 
 ## Compatibility with `evennia-shards`
 
-The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [docs/shards-compatibility.md](docs/shards-compatibility.md).
+The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [docs/shards-compatibility.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/shards-compatibility.md).
 
-Co-installed, the pairing also requires `shard` as the first declared level and confines `ms_load` to the shard it is running as. See [docs/interoperability.md](docs/interoperability.md).
+Co-installed, the pairing also requires `shard` as the first declared level and confines `ms_load` to the shard it is running as. See [docs/interoperability.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/interoperability.md).
 
 ## Learn more
 
-- **[CLAUDE.md](CLAUDE.md)** — load-bearing principles and orientation for working in the repository.
-- **[docs/INDEX.md](docs/INDEX.md)** — index of design documents.
-- **[docs/architecture.md](docs/architecture.md)** — the spawn system's mechanisms and the library / consumer ownership boundary; the first architectural pass.
+- **[CLAUDE.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/CLAUDE.md)** — load-bearing principles and orientation for working in the repository.
+- **[docs/INDEX.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/INDEX.md)** — index of design documents.
+- **[docs/architecture.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/architecture.md)** — the spawn system's mechanisms and the library / consumer ownership boundary; the first architectural pass.
 
 ## License
 
-BSD 3-Clause. See [LICENSE](LICENSE).
+BSD 3-Clause. See [LICENSE](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/LICENSE).
