@@ -2,6 +2,10 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-15 — Published to PyPI as `evennia-mob-spawner` 0.1.0
+
+First public release: https://pypi.org/project/evennia-mob-spawner/0.1.0/. Prep added `pyproject.toml` packaging metadata (classifiers, keywords, project URLs, a `dev` optional-dependencies group) and converted every `README.md` link to an absolute GitHub URL — PyPI renders the README standalone, with no repo file tree behind it, so relative links that work fine on GitHub would 404 there. Built with `python -m build`, verified via `twine check` and a clean-room `pip install` into a fresh venv before upload. Tagged `v0.1.0`.
+
 ## 2026-08-09 — scripts stamped with their owning shard; commands gated to where they can act
 
 Closes the runtime half left open by the entry below. The Deployer now stamps the shards library's `owning_shard` Attribute on every script it creates or upserts, and shards confines the ticks to that process. Inferring the owner is safe because `ms_load` already refuses to run anywhere but the owning shard. Nothing is stamped off a sharded deployment, and an unstamped script stays unconfined.
