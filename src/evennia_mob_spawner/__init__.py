@@ -25,7 +25,7 @@ from .config import get_configured_reader, get_reader_class
 from .definitions import Definitions
 from .errors import DefinitionsError
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "__version__",

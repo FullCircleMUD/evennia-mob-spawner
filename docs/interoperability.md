@@ -34,7 +34,7 @@ does standalone.
 
 A command's effect usually stops at the process running it, either because it writes rows this process
 can see, or because it reaches for a script's live `ndb._task`, which exists only where the script
-runs. Four commands therefore carry the same scope gate: the whole-world scope is refused, the query
+runs. Five commands therefore carry the same scope gate: the whole-world scope is refused, the query
 must start with `shard=`, and it must name this shard.
 
 | Command | Gate | Why |
@@ -43,8 +43,8 @@ must start with `shard=`, and it must name this shard.
 | `ms_stop` | shard-scoped | `pause()` reads the local `ndb._task` |
 | `ms_restart` | shard-scoped | `unpause()` / `start()` attach locally |
 | `ms_delete` | shard-scoped | stops only the local task, then removes the shared row |
+| `ms_status` | shard-scoped | reads the local `ndb._task` to tell a stalled script from a ticking one |
 | `ms_spawn_report` | cluster-wide only | counts under the auto-filter; correct only unscoped |
-| `ms_status` | none | reads shared row fields, so it is correct anywhere |
 
 The failure modes the gates prevent differ, and are worth naming because they are all quiet. `ms_stop`
 from a foreign process writes nothing at all and still reports success. `ms_delete` removes the shared
@@ -57,9 +57,13 @@ The router runs unscoped and is the only process that can answer for the whole w
 left unstamped, so the command is refused only on a shard. The check collapses to that single case
 because the router, monolith and standalone all see everything already.
 
-`ms_status` is deliberately ungated: it derives state from shared row fields alone, so it returns the
-same answer everywhere and is useful from the router as a cluster-wide view. Its absence from the
-gated set is a decision, not an oversight.
+`ms_status` is gated even though it changes nothing. Two of the three states it reports — paused and
+stopped — come from shared row fields and read the same anywhere. The third, *stalled* (architecture.md
+decision #26), is a script marked active with no `LoopingCall` attached, and that task is a live object
+in one process's memory rather than a column. Off-process the task is absent rather than gone, so an
+ungated `ms_status` would report every foreign script as stalled. Seeing a stall at a glance is worth
+more than answering for every shard from one place, so the gate applies and the command is run per
+shard.
 
 ### Scripts are confined to the shard that owns them
 

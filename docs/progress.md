@@ -2,6 +2,38 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-16 — the stalled state: named, recoverable, and no longer reported as success
+
+Diagnosed live on Railway. Every mob in the world stopped respawning while all nine scripts reported
+`active`. `time_until_next_repeat()` returned `None` on all of them: the row said active, no pause
+marker was set, and no `LoopingCall` was attached.
+
+Evennia writes the pause marker only when a task exists, so a task lost any other way leaves a script
+in a state none of its recovery paths can reach. `pause()`, `unpause()` and the boot walk are all
+gated on that marker and all did nothing — which is why a container reboot did not help. Only
+`start()` attaches a fresh task, and it has to run on the shard owning the script.
+
+Every operator route into the state was quiet, and that is what made it expensive to find:
+
+- `ms_restart` read the state as `active`, printed `already active`, and returned without acting.
+- `ms_stop` called `pause()`, which wrote nothing, then reported `stopped` and logged `paused`.
+- `ms_load` swapped the rule table correctly, resumed via `unpause()`, and reported a clean deploy —
+  onto a script that stayed dead.
+
+So each command now answers for its own job. `ms_status` names the state — before this, the only
+difference between a healthy script and a dead one was a missing `next=` estimate, an absence with no
+label on it. Naming it means reading the live task, so `ms_status` now carries the shard gate and is
+run per shard; the router's cluster view was the deliberate trade. `ms_stop` reports the stall instead
+of claiming a pause.
+`ms_restart` calls `start()` and then confirms a task actually attached, on every restart route rather
+than only this one. `ms_load` checks the scope before reading any rule-set YAML — a stall costs a
+manifest walk rather than a full load-and-validate — then refuses the whole scope, names every stalled
+script so one `ms_restart` clears them all, and points there. Both a stall sighting and a failed
+recovery reach `mob_spawner.log`.
+
+**270 tests green** (was 232). Cause of the lost task is still open — see decision #26 in
+[architecture.md](architecture.md).
+
 ## 2026-08-15 — Published to PyPI as `evennia-mob-spawner` 0.1.0
 
 First public release: https://pypi.org/project/evennia-mob-spawner/0.1.0/. Prep added `pyproject.toml` packaging metadata (classifiers, keywords, project URLs, a `dev` optional-dependencies group) and converted every `README.md` link to an absolute GitHub URL — PyPI renders the README standalone, with no repo file tree behind it, so relative links that work fine on GitHub would 404 there. Built with `python -m build`, verified via `twine check` and a clean-room `pip install` into a fresh venv before upload. Tagged `v0.1.0`.

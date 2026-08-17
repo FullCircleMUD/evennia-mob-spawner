@@ -59,6 +59,7 @@ from evennia_mob_spawner.commands import (
     check_shard_scope,
     should_pre_validate,
 )
+from evennia_mob_spawner.commands import _is_stalled, check_scope_not_stalled
 from evennia_mob_spawner.finder import Finder, FoundLocation
 from evennia_mob_spawner.loader import Loader, LoadResult
 from evennia_mob_spawner.validator import LoadedRule, Validator
@@ -110,7 +111,7 @@ SCAFFOLD = {
 
 class PackageSmokeTest(TestCase):
     def test_version_present(self):
-        self.assertEqual(evennia_mob_spawner.__version__, "0.1.0")
+        self.assertEqual(evennia_mob_spawner.__version__, "0.1.1")
 
 
 class LogShimSmokeTest(TestCase):
@@ -2960,15 +2961,17 @@ class CommandScopeGateTest(TestCase):
         # pause() and delete() both reach for ndb._task, which exists only
         # in the process running the script — so a broad scope would act on
         # this shard's share while reporting a clean sweep of all of them.
+        # ms_status only reads that task, but reading it off-process would
+        # report every foreign script as stalled, so it carries the gate too.
         stop, delete, restart, status, report = self._cmds()
-        for cmd in (stop, delete, restart):
+        for cmd in (stop, delete, restart, status):
             self.assertTrue(cmd.shard_scoped, f"{cmd.key} should be shard-scoped")
 
-    def test_read_only_commands_are_not_shard_scoped(self):
-        # ms_status reads shared row fields, so it is correct anywhere.
-        # ms_spawn_report carries the cluster-wide gate instead.
-        _stop, _delete, _restart, status, report = self._cmds()
-        self.assertFalse(status.shard_scoped)
+    def test_the_census_is_not_shard_scoped(self):
+        # ms_spawn_report carries the cluster-wide gate instead — its counts
+        # run under the tenancy auto-filter, so only an unscoped process can
+        # answer for the whole world.
+        _stop, _delete, _restart, _status, report = self._cmds()
         self.assertFalse(report.shard_scoped)
 
     def test_only_the_census_is_cluster_wide(self):
@@ -2996,3 +2999,316 @@ class CommandScopeGateTest(TestCase):
             "evennia_mob_spawner.commands.active_shard_id", return_value="shard0"
         ):
             self.assertIn("ms_load", check_shard_scope({}))
+
+
+class StalledScriptTest(EvenniaWorldTestCase):
+    """A script marked active but carrying no live tick.
+
+    Evennia writes the pause marker only when a task exists
+    (``_pause_task``), so a task lost any other way leaves ``is_active``
+    True and ``_paused_time`` unset. Everything gated on that marker —
+    the boot walk, ``pause()``, ``unpause()`` — then does nothing, which
+    is a state ``ms_stop`` must not report success against.
+    """
+
+    def _script(self):
+        return _TickLoopFixture.deploy_rule(dict(_VALID_RULE))
+
+    @staticmethod
+    def _stall(script):
+        """Put ``script`` in the state: active, unpaused, no task."""
+        script.ndb._task = None
+        script.db._paused_time = None
+        return script
+
+    def _stop(self, script):
+        from evennia_mob_spawner.commands import CmdMsStop
+        messages = []
+        CmdMsStop().apply(script, messages)
+        return messages
+
+    # -- detection ---------------------------------------------------
+
+    def test_active_without_a_task_is_stalled(self):
+        self.assertTrue(_is_stalled(self._stall(self._script())))
+
+    def test_active_with_a_task_is_not_stalled(self):
+        script = self._script()
+        script.start()
+        self.assertFalse(_is_stalled(script))
+
+    def test_paused_script_is_not_stalled(self):
+        # A paused script has a marker, so the recovery paths work on it.
+        script = self._stall(self._script())
+        script.db._paused_time = 5
+        self.assertFalse(_is_stalled(script))
+
+    def test_stopped_script_is_not_stalled(self):
+        script = self._stall(self._script())
+        script.db_is_active = False
+        self.assertFalse(_is_stalled(script))
+
+    # -- ms_stop -----------------------------------------------------
+
+    def test_ms_stop_reports_the_stall_rather_than_success(self):
+        script = self._stall(self._script())
+        message = " ".join(self._stop(script))
+        self.assertIn("not ticking", message)
+        self.assertIn("ms_restart", message)
+
+    def test_ms_stop_leaves_a_stalled_script_untouched(self):
+        # pause() cannot write the marker without a task, so calling it
+        # would only produce a "paused" log line that never happened.
+        script = self._stall(self._script())
+        self._stop(script)
+        self.assertIsNone(script.db._paused_time)
+        self.assertTrue(script.is_active)
+
+    def test_ms_stop_still_pauses_a_running_script(self):
+        script = self._script()
+        script.start()
+        message = " ".join(self._stop(script))
+        self.assertIn("stopped", message)
+        self.assertIsNotNone(script.db._paused_time)
+
+    # -- ms_restart --------------------------------------------------
+
+    def _restart(self, script):
+        from evennia_mob_spawner.commands import CmdMsRestart
+        messages = []
+        CmdMsRestart().apply(script, messages)
+        return messages
+
+    def test_ms_restart_recovers_a_stalled_script(self):
+        script = self._stall(self._script())
+        message = " ".join(self._restart(script))
+        self.assertIn("was stalled", message)
+        self.assertIsNotNone(script.ndb._task)
+
+    def test_ms_restart_names_the_stall_apart_from_a_stop(self):
+        # The two reach start() by different routes; the log has to tell
+        # them apart or a recurring stall reads as an operator stopping it.
+        script = self._stall(self._script())
+        self.assertNotIn("was stopped", " ".join(self._restart(script)))
+
+    def test_ms_restart_leaves_a_running_script_alone(self):
+        script = self._script()
+        script.start()
+        self.assertIn("already active", " ".join(self._restart(script)))
+
+    def test_ms_restart_still_unpauses_a_paused_script(self):
+        script = self._script()
+        script.start()
+        script.pause()
+        message = " ".join(self._restart(script))
+        self.assertIn("was paused", message)
+        self.assertIsNone(script.db._paused_time)
+
+    def test_ms_restart_reports_a_start_that_did_not_take(self):
+        script = self._stall(self._script())
+        with mock.patch.object(script, "start"):
+            message = " ".join(self._restart(script))
+        self.assertIn("no tick attached", message)
+
+    def test_ms_restart_says_nothing_extra_when_the_tick_attaches(self):
+        # The check is there to catch a failure, not to narrate a success.
+        script = self._stall(self._script())
+        self.assertNotIn("no tick attached", " ".join(self._restart(script)))
+
+    def test_ms_restart_still_starts_a_stopped_script(self):
+        script = self._script()
+        script.stop()
+        message = " ".join(self._restart(script))
+        self.assertIn("was stopped", message)
+        self.assertIsNotNone(script.ndb._task)
+
+    def test_ms_restart_reports_an_unpause_that_did_not_take(self):
+        # The check guards every route to a restart, not only the stalled
+        # one — unpause() has its own ways of silently doing nothing.
+        script = self._script()
+        script.start()
+        script.pause()
+        with mock.patch.object(script, "unpause"):
+            message = " ".join(self._restart(script))
+        self.assertIn("no tick attached", message)
+
+    # -- the states ms_stop must leave alone -------------------------
+
+    def test_ms_stop_reports_a_paused_script_unchanged(self):
+        script = self._script()
+        script.start()
+        script.pause()
+        self.assertIn("already paused", " ".join(self._stop(script)))
+
+    def test_ms_stop_reports_a_stopped_script_unchanged(self):
+        script = self._script()
+        script.stop()
+        self.assertIn("already stopped", " ".join(self._stop(script)))
+
+    # -- the log line that makes a recurrence visible ----------------
+
+    def _levels_logged(self, run, script):
+        with mock.patch("evennia_mob_spawner.commands.ms_log") as logged:
+            run(script)
+        return [call.kwargs.get("level") for call in logged.call_args_list]
+
+    def test_ms_stop_logs_the_stall_at_warn(self):
+        script = self._stall(self._script())
+        self.assertIn("WARN", self._levels_logged(self._stop, script))
+
+    def test_ms_restart_logs_the_stall_at_warn(self):
+        script = self._stall(self._script())
+        self.assertIn("WARN", self._levels_logged(self._restart, script))
+
+    def test_a_normal_stop_is_not_logged_at_warn(self):
+        script = self._script()
+        script.start()
+        self.assertNotIn("WARN", self._levels_logged(self._stop, script))
+
+    # -- ms_status ---------------------------------------------------
+
+    def _status(self, script):
+        from evennia_mob_spawner.commands import CmdMsStatus
+        messages = []
+        CmdMsStatus().apply(script, messages)
+        return " ".join(messages)
+
+    def test_ms_status_names_a_stalled_script(self):
+        script = self._stall(self._script())
+        self.assertIn("stalled", self._status(script))
+
+    def test_ms_status_gives_a_stalled_script_no_next_tick(self):
+        # The absent next= was the only tell before; it must not be the
+        # only tell now, but it must still not claim a tick is coming.
+        script = self._stall(self._script())
+        self.assertNotIn("next=", self._status(script))
+
+    def test_ms_status_reports_a_ticking_script_as_active(self):
+        script = self._script()
+        script.start()
+        line = self._status(script)
+        self.assertIn("active", line)
+        self.assertNotIn("stalled", line)
+        self.assertIn("next=", line)
+
+    def test_ms_status_reports_a_paused_script_as_paused(self):
+        script = self._script()
+        script.start()
+        script.pause()
+        line = self._status(script)
+        self.assertIn("paused", line)
+        self.assertNotIn("stalled", line)
+
+    def test_ms_status_reports_a_stopped_script_as_stopped(self):
+        script = self._script()
+        script.stop()
+        line = self._status(script)
+        self.assertIn("stopped", line)
+        self.assertNotIn("stalled", line)
+
+    # -- colour ------------------------------------------------------
+
+    def test_a_stalled_script_reads_red(self):
+        self.assertIn("|rstalled|n", self._status(self._stall(self._script())))
+
+    def test_a_ticking_script_reads_green(self):
+        script = self._script()
+        script.start()
+        self.assertIn("|gactive|n", self._status(script))
+
+    def test_a_paused_script_reads_yellow(self):
+        script = self._script()
+        script.start()
+        script.pause()
+        self.assertIn("|ypaused|n", self._status(script))
+
+    def test_only_the_state_word_is_coloured(self):
+        # The operator is scanning for the odd one out, not reading prose.
+        line = self._status(self._stall(self._script()))
+        self.assertNotIn("|r", line.split("stalled|n")[1])
+
+
+class MsLoadStallGateTest(EvenniaWorldTestCase):
+    """``ms_load`` refuses to deploy onto a script that is not ticking.
+
+    Deploying onto a stalled script swaps its rules and reports a clean
+    deploy while the script stays dead. Refusing sends the operator to
+    ``ms_restart`` and keeps ``ms_load`` doing the one job it names.
+    """
+
+    MILLHOLM = "shard0/millholm.yaml"
+    WILDERNESS = "shard0/wilderness.yaml"
+
+    def _script(self, path, *, stalled=False):
+        script = _TickLoopFixture.deploy_rule(dict(_VALID_RULE), path=path)
+        if stalled:
+            script.ndb._task = None
+            script.db._paused_time = None
+        else:
+            script.start()
+        return script
+
+    def _check(self, query):
+        return check_scope_not_stalled(
+            query,
+            FixtureReader(SCAFFOLD),
+            Definitions.from_dict({"levels": ["shard", "zone"]}),
+        )
+
+    # -- when it stays out of the way --------------------------------
+
+    def test_a_healthy_scope_is_not_refused(self):
+        self._script(self.MILLHOLM)
+        self.assertIsNone(self._check({"shard": "shard0"}))
+
+    def test_a_scope_with_no_scripts_yet_is_not_refused(self):
+        # First-ever deploy of a file: nothing exists to be stalled.
+        self.assertIsNone(self._check({"shard": "shard0"}))
+
+    def test_a_stall_outside_the_scope_is_not_refused(self):
+        self._script(self.WILDERNESS, stalled=True)
+        self.assertIsNone(
+            self._check({"shard": "shard0", "zone": "millholm"})
+        )
+
+    # -- when it refuses ---------------------------------------------
+
+    def test_a_stalled_script_refuses_the_load(self):
+        self._script(self.MILLHOLM, stalled=True)
+        refusal = self._check({"shard": "shard0", "zone": "millholm"})
+        self.assertIn("stalled", refusal)
+        self.assertIn(self.MILLHOLM, refusal)
+
+    def test_every_stalled_script_is_named(self):
+        # One ms_restart over the same scope should clear the lot, so the
+        # operator needs the full list, not the first one hit.
+        self._script(self.MILLHOLM, stalled=True)
+        self._script(self.WILDERNESS, stalled=True)
+        refusal = self._check({"shard": "shard0"})
+        self.assertIn(self.MILLHOLM, refusal)
+        self.assertIn(self.WILDERNESS, refusal)
+
+    def test_one_stalled_script_blocks_the_whole_scope(self):
+        # All-or-nothing: a partial deploy reported as complete is the
+        # failure this guard exists to prevent.
+        self._script(self.MILLHOLM, stalled=True)
+        self._script(self.WILDERNESS)
+        refusal = self._check({"shard": "shard0"})
+        self.assertIsNotNone(refusal)
+        self.assertIn(self.MILLHOLM, refusal)
+        self.assertNotIn(self.WILDERNESS, refusal)
+
+    # -- what it tells the operator to do ----------------------------
+
+    def test_refusal_points_at_ms_restart_over_the_same_scope(self):
+        self._script(self.MILLHOLM, stalled=True)
+        refusal = self._check({"shard": "shard0", "zone": "millholm"})
+        self.assertIn("ms_restart shard=shard0 zone=millholm", refusal)
+
+    def test_refusal_on_a_whole_repo_scope_points_at_restart_all(self):
+        self._script(self.MILLHOLM, stalled=True)
+        self.assertIn("ms_restart all", self._check({}))
+
+    def test_refusal_names_ms_load_as_the_command_to_re_run(self):
+        self._script(self.MILLHOLM, stalled=True)
+        self.assertIn("re-run ms_load", self._check({"shard": "shard0"}))

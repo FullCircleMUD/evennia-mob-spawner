@@ -417,6 +417,26 @@ class CmdMsLoad(BaseCommand):
             ms_log(msg, level="ERROR")
             return messages
 
+        # Ahead of reading a single rule-set file: a stalled script in the
+        # scope makes the whole load moot, so a stall costs a manifest walk
+        # rather than a full load-and-validate of the repo.
+        try:
+            refusal = check_scope_not_stalled(query, reader, definitions)
+        except FinderQueryError as e:
+            msg = f"ms_load: {e}"
+            messages.append(msg)
+            ms_log(msg, level="ERROR")
+            return messages
+        except FinderManifestError as e:
+            msg = f"ms_load: manifest error: {e}"
+            messages.append(msg)
+            ms_log(msg, level="ERROR")
+            return messages
+        if refusal:
+            messages.append(refusal)
+            ms_log(" ".join(refusal.split()), level="WARN")
+            return messages
+
         finder = Finder(reader, definitions)
         loader = Loader(reader, definitions)
 
@@ -593,6 +613,47 @@ def _script_state(script) -> str:
     return "active"
 
 
+def _is_stalled(script) -> bool:
+    """True if ``script`` is marked active but carries no live tick.
+
+    A script reaches this state when its ``ndb._task`` is lost without the
+    pause marker being written — ``_pause_task`` only records ``_paused_time``
+    when a task exists, so a task that disappears any other way leaves
+    ``is_active`` True with nothing scheduled. ``_script_state`` reports that
+    as "active", and Evennia's own recovery path cannot escape it:
+    ``_unpause_task`` is gated on ``_paused_time``, so the boot walk, ``pause()``
+    and ``unpause()`` are all no-ops. Only ``start()`` attaches a fresh task.
+
+    Reads ``ndb._task``, which exists only in the process running the script,
+    so this is meaningful **only** on a ``shard_scoped`` command. Anywhere
+    else it reports every foreign script as stalled.
+    """
+    return (
+        bool(script.is_active)
+        and not script.db._paused_time
+        and not script.ndb._task
+    )
+
+
+_STATE_COLOURS = {
+    "active": "|g",   # ticking
+    "paused": "|y",   # not running, and someone meant it
+    "stopped": "|y",
+    "stalled": "|r",  # not running, and nobody meant it
+}
+
+
+def _colour_state(state: str) -> str:
+    """Wrap a state word in an Evennia colour code.
+
+    Scanning a list of scripts for the one that is wrong is the job the
+    operator actually has, so the state carries the colour rather than the
+    whole line. Unknown states pass through uncoloured.
+    """
+    colour = _STATE_COLOURS.get(state)
+    return f"{colour}{state}|n" if colour else state
+
+
 def _resolve_scope_to_scripts(query: dict, reader, definitions):
     """Return ``(scripts, scope_description)`` for an operator query.
 
@@ -628,6 +689,44 @@ def _resolve_scope_to_scripts(query: dict, reader, definitions):
     prefix = f"{found.path}/"
     scripts = list(MobSpawnerScript.objects.filter(db_key__startswith=prefix))
     return scripts, f"under {found.path}"
+
+
+def check_scope_not_stalled(query: dict, reader, definitions) -> str | None:
+    """Return an operator-facing refusal if any script in scope is stalled.
+
+    ``ms_load``'s job is rule content; getting a dead ticker going again is
+    ``ms_restart``'s. Deploying onto a stalled script swaps its rules and
+    reports a clean deploy while the script stays dead — so an operator
+    reaching for ``ms_load`` to troubleshoot a stall is told which command
+    they actually want, rather than being handed a success message.
+
+    Refuses the whole scope rather than skipping the stalled files. A
+    partial deploy reported as complete is the failure this guards against,
+    one level down. Naming every stalled script means one ``ms_restart``
+    over the same scope clears them all before the load is re-run.
+
+    Reads ``ndb._task`` via :func:`_is_stalled`, which is only meaningful in
+    the process running the script — sound here because ``ms_load`` already
+    refuses to run anywhere but the shard owning the scope.
+
+    Raises:
+        FinderQueryError / FinderManifestError: if the manifest can't be
+            walked — callers surface these as operator messages.
+    """
+    scripts, _scope = _resolve_scope_to_scripts(query, reader, definitions)
+    stalled = sorted(s.db_key for s in scripts if _is_stalled(s))
+    if not stalled:
+        return None
+
+    scope_args = " ".join(f"{k}={v}" for k, v in query.items()) or _ALL_TOKEN
+    listing = "\n".join(f"  {key}" for key in stalled)
+    return (
+        f"ms_load: refusing — {len(stalled)} "
+        f"script{'' if len(stalled) == 1 else 's'} stalled "
+        f"(active but not ticking):\n{listing}\n"
+        f"Run `ms_restart {scope_args}` to get them ticking, "
+        f"then re-run ms_load to deploy."
+    )
 
 
 class _MsOperateBase(BaseCommand):
@@ -801,6 +900,19 @@ class CmdMsStop(_MsOperateBase):
         if state != "active":
             messages.append(f"  {script.db_key}: already {state}")
             return
+        if _is_stalled(script):
+            # pause() would be a no-op here (see _is_stalled) and reporting
+            # "stopped" off the back of it puts a false line in the log. Say
+            # what is actually true and point at the one command that escapes.
+            messages.append(
+                f"  {script.db_key}: not ticking — nothing to stop "
+                f"(run ms_restart to recover)"
+            )
+            ms_log(
+                f"ms_stop: {script.db_key} found stalled (active, no task)",
+                level="WARN",
+            )
+            return
         script.pause()
         messages.append(f"  {script.db_key}: stopped")
         ms_log(f"ms_stop: {script.db_key} paused")
@@ -826,6 +938,23 @@ class CmdMsRestart(_MsOperateBase):
 
     def apply(self, script, messages: list) -> None:
         state = _script_state(script)
+        # Ahead of the "active" check, because a stalled script reads as
+        # active — and unpause() cannot reach it, having no pause marker
+        # to work from. start() attaches a task unconditionally, so it is
+        # the only route out (see _is_stalled).
+        if _is_stalled(script):
+            script.start()
+            messages.append(
+                f"  {script.db_key}: restarted "
+                f"(was stalled — active but not ticking)"
+            )
+            ms_log(
+                f"ms_restart: {script.db_key} restarted from stalled "
+                f"(active, no task)",
+                level="WARN",
+            )
+            self._confirm_ticking(script, messages)
+            return
         if state == "active":
             messages.append(f"  {script.db_key}: already active")
             return
@@ -833,6 +962,7 @@ class CmdMsRestart(_MsOperateBase):
             script.unpause()
             messages.append(f"  {script.db_key}: restarted (was paused)")
             ms_log(f"ms_restart: {script.db_key} unpaused")
+            self._confirm_ticking(script, messages)
             return
         # stopped — needs start(), not unpause(). Decision #18 says
         # ms_restart kicks the ticker on an existing script regardless
@@ -840,6 +970,27 @@ class CmdMsRestart(_MsOperateBase):
         script.start()
         messages.append(f"  {script.db_key}: restarted (was stopped)")
         ms_log(f"ms_restart: {script.db_key} started")
+        self._confirm_ticking(script, messages)
+
+    @staticmethod
+    def _confirm_ticking(script, messages: list) -> None:
+        """Report a restart that didn't take, rather than claiming success.
+
+        Every route into a stalled script is a silent no-op — that is what
+        makes the state expensive to diagnose. A recovery command that
+        reports success without one is the same trap one step further on,
+        so the claim is checked before it is made.
+        """
+        if script.ndb._task:
+            return
+        messages.append(
+            f"  {script.db_key}: ...but no tick attached — "
+            f"see mob_spawner.log"
+        )
+        ms_log(
+            f"ms_restart: {script.db_key} restarted but no task attached",
+            level="ERROR",
+        )
 
 
 class CmdMsDelete(_MsOperateBase):
@@ -876,23 +1027,31 @@ class CmdMsStatus(_MsOperateBase):
         ms_status all
         ms_status <level>=<value> [<level>=<value> ...]
 
-    Reports one line per script: path, active/paused state, rule
-    count, tick interval, time-since-tick (or next-tick estimate).
+    Reports one line per script: path, state, rule count, tick
+    interval, and a next-tick estimate for a script that is ticking.
     """
 
     key = "ms_status"
     op_label = "inspect"
 
+    # Read-only, but still gated: telling a stalled script from a healthy
+    # one means reading ndb._task, which exists only in the process running
+    # the script. From anywhere else the task is absent rather than gone,
+    # and the command would report every foreign script as stalled. Seeing
+    # a stall at a glance is worth more than answering for every shard from
+    # one place — see architecture.md decision #26.
+    shard_scoped = True
+
     def apply(self, script, messages: list) -> None:
-        state = _script_state(script)
+        state = "stalled" if _is_stalled(script) else _script_state(script)
         rule_count = len(script.db.spawn_table or [])
         rule_suffix = "" if rule_count == 1 else "s"
         line = (
-            f"  {script.db_key}: {state}, "
+            f"  {script.db_key}: {_colour_state(state)}, "
             f"{rule_count} rule{rule_suffix}, interval={script.interval}s"
         )
         # ``next=`` only makes sense when the ticker is actively scheduled.
-        # Paused / stopped scripts have no next-tick time.
+        # Paused / stopped / stalled scripts have no next-tick time.
         if state == "active":
             try:
                 next_in = script.time_until_next_repeat()
