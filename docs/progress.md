@@ -2,6 +2,13 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-16 — Published to PyPI as `evennia-mob-spawner` 0.1.1
+
+The stalled-state fix below, published: https://pypi.org/project/evennia-mob-spawner/0.1.1/. Version
+bumped in `pyproject.toml`, `__init__.py`, and the smoke test asserting the literal. Built with
+`python -m build`, verified via `twine check` and a clean-room `pip install` into a fresh venv before
+upload, then re-verified against the live PyPI copy with a forced uncached install. Tagged `v0.1.1`.
+
 ## 2026-08-16 — the stalled state: named, recoverable, and no longer reported as success
 
 Diagnosed live on Railway. Every mob in the world stopped respawning while all nine scripts reported
