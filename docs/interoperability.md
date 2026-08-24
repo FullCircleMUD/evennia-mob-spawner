@@ -5,6 +5,11 @@ constrained by, a sibling: it reads rule-set YAML through a pluggable reader, cr
 `MobSpawnerScript` per rule-set file**, dispatches its deploy pipeline **off the reactor thread**, and
 calls `create_object` on every tick to place mobs into rooms it locates **by tag**.
 
+## evennia-archive
+
+`[TBD — needs section: evennia-archive was created 2026-08-23 and this entry has not been written.
+See libraries/evennia-archive/docs/interoperability.md for what that library expects.]`
+
 ## evennia-mob-spawner
 
 This library.
