@@ -463,41 +463,74 @@ class MobSpawnerScript(_BASE_SCRIPT):
             key=rule["key"],
             location=room,
         )
-        mob.tags.add(rule["area_tag"], category=get_area_tag_category())
-        # rule_id is a non-negative int; tag keys are strings.
-        # self.db_key is the script's persistent key, set by the Deployer
-        # to the rule-set file's repo path.
-        mob.tags.add(str(rule["rule_id"]), category=_RULE_TAG_CATEGORY)
-        mob.tags.add(self.db_key, category=_FILE_TAG_CATEGORY)
 
-        # YAML-declared tags (optional). Shape pre-validated by
-        # ``_check_tags_field_shape``; ``_normalise_tag`` collapses
-        # string vs dict entries to a uniform ``(key, category)`` pair.
-        for tag_entry in rule.get("tags") or []:
-            key, category = _normalise_tag(tag_entry)
-            mob.tags.add(key, category=category)
+        # Everything from here to the hook is rolled back on failure.
+        #
+        # create_object() has already committed the mob to the database, so
+        # an exception in tagging or attribute application would otherwise
+        # leave a real, located mob carrying none of its identity tags. The
+        # caller catches per-rule and moves on (decision #14), so nothing
+        # else would clean it up — and because population counts are taken
+        # by querying those very tags, an untagged mob is invisible to them:
+        # never counted, never culled, never replaced. It simply accumulates.
+        #
+        # delete() rather than a database transaction: at_object_creation()
+        # can start tickers and scripts, and a transaction rollback would
+        # leave those pointing at a row that no longer exists.
+        try:
+            mob.tags.add(rule["area_tag"], category=get_area_tag_category())
+            # rule_id is a non-negative int; tag keys are strings.
+            # self.db_key is the script's persistent key, set by the Deployer
+            # to the rule-set file's repo path.
+            mob.tags.add(str(rule["rule_id"]), category=_RULE_TAG_CATEGORY)
+            mob.tags.add(self.db_key, category=_FILE_TAG_CATEGORY)
 
-        # Apply rule-level description override.
-        if "desc" in rule:
-            mob.db.desc = rule["desc"]
+            # YAML-declared tags (optional). Shape pre-validated by
+            # ``_check_tags_field_shape``; ``_normalise_tag`` collapses
+            # string vs dict entries to a uniform ``(key, category)`` pair.
+            for tag_entry in rule.get("tags") or []:
+                key, category = _normalise_tag(tag_entry)
+                mob.tags.add(key, category=category)
 
-        # Apply rule-level attribute overrides. setattr only persists if
-        # the typeclass declares attr_name as an AttributeProperty —
-        # otherwise it silently sets a plain, non-persisted Python
-        # attribute that vanishes with the object (consumer pattern;
-        # see src/game CLAUDE.md note on AttributeProperty access).
-        # WARN when that's about to happen so a missing declaration is
-        # caught immediately rather than silently producing mobs that
-        # never carry their configured loot/state.
-        for attr_name, attr_val in (rule.get("attrs") or {}).items():
-            if not _persists_as_attribute(mob, attr_name):
+            # Apply rule-level description override.
+            if "desc" in rule:
+                mob.db.desc = rule["desc"]
+
+            # Apply rule-level attribute overrides. setattr only persists if
+            # the typeclass declares attr_name as an AttributeProperty —
+            # otherwise it silently sets a plain, non-persisted Python
+            # attribute that vanishes with the object (consumer pattern;
+            # see src/game CLAUDE.md note on AttributeProperty access).
+            # WARN when that's about to happen so a missing declaration is
+            # caught immediately rather than silently producing mobs that
+            # never carry their configured loot/state.
+            for attr_name, attr_val in (rule.get("attrs") or {}).items():
+                if not _persists_as_attribute(mob, attr_name):
+                    ms_log(
+                        f"{self.db_key}: rule_id={rule['rule_id']} sets "
+                        f"attrs.{attr_name} but {type(mob).__name__} has no "
+                        f"matching AttributeProperty — value will not persist",
+                        level="WARN",
+                    )
+                setattr(mob, attr_name, attr_val)
+        except Exception:
+            # Report the rollback separately: a cleanup that itself fails
+            # leaves exactly the orphan this block exists to prevent, and
+            # that needs to be visible rather than masked by the re-raise.
+            try:
+                mob.delete()
                 ms_log(
-                    f"{self.db_key}: rule_id={rule['rule_id']} sets "
-                    f"attrs.{attr_name} but {type(mob).__name__} has no "
-                    f"matching AttributeProperty — value will not persist",
+                    f"{self.db_key}: rule_id={rule['rule_id']} spawn rolled "
+                    f"back — partially-built mob deleted, no orphan left",
                     level="WARN",
                 )
-            setattr(mob, attr_name, attr_val)
+            except Exception as cleanup_err:
+                ms_log(
+                    f"{self.db_key}: rule_id={rule['rule_id']} rollback "
+                    f"failed — untagged mob left in world: {cleanup_err}",
+                    level="ERROR",
+                )
+            raise
 
         # Optional ms_at_post_spawn() hook on the typeclass (decision #23).
         hook = getattr(mob, _MS_AT_POST_SPAWN_ATTR, None)

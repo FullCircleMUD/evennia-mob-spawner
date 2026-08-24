@@ -111,7 +111,7 @@ SCAFFOLD = {
 
 class PackageSmokeTest(TestCase):
     def test_version_present(self):
-        self.assertEqual(evennia_mob_spawner.__version__, "0.1.1")
+        self.assertEqual(evennia_mob_spawner.__version__, "0.1.2")
 
 
 class LogShimSmokeTest(TestCase):
@@ -3312,3 +3312,91 @@ class MsLoadStallGateTest(EvenniaWorldTestCase):
     def test_refusal_names_ms_load_as_the_command_to_re_run(self):
         self._script(self.MILLHOLM, stalled=True)
         self.assertIn("re-run ms_load", self._check({"shard": "shard0"}))
+
+
+class SpawnRollbackTest(EvenniaWorldTestCase):
+    """``_spawn_one`` is all-or-nothing from creation through attrs.
+
+    ``create_object()`` commits the mob before any tag is stamped, and the
+    caller catches per-rule and carries on (decision #14). Without a
+    rollback, a failure in between leaves a real, located mob wearing none
+    of its identity tags — and because populations are counted by querying
+    those tags, it is invisible: never counted, never culled, never
+    replaced. Orphans accumulate silently for the life of the database.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self):
+        return {
+            "rule_id": 1,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+
+    def _objects_named(self, key):
+        from evennia.objects.models import ObjectDB
+        return list(ObjectDB.objects.filter(db_key=key))
+
+    def _spawn_with_failure_at(self, patch_target, rule=None):
+        """Run one spawn with *patch_target* raising, return the script."""
+        rule = rule or self._rule()
+        room = _TickLoopFixture.make_room("Rollback Room")
+        script = _TickLoopFixture.deploy_rule(rule)
+        with mock.patch(patch_target, side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                script._spawn_one(rule, room)
+        return script
+
+    def test_tagging_failure_leaves_no_mob_behind(self):
+        """The orphan case: exception while stamping identity tags."""
+        self._spawn_with_failure_at(
+            "evennia_mob_spawner.script.get_area_tag_category"
+        )
+        self.assertEqual(
+            self._objects_named("a test mob"), [],
+            "a partially-built mob survived a failed spawn",
+        )
+
+    def test_attrs_failure_leaves_no_mob_behind(self):
+        """Failure later in the sequence rolls back just the same.
+
+        Needs a rule that actually carries ``attrs`` — without one the
+        loop never runs and the patched failure is never reached.
+        """
+        rule = dict(self._rule(), attrs={"some_value": 3})
+        self._spawn_with_failure_at(
+            "evennia_mob_spawner.script._persists_as_attribute", rule=rule
+        )
+        self.assertEqual(
+            self._objects_named("a test mob"), [],
+            "a mob survived a failure during attribute application",
+        )
+
+    def test_successful_spawn_still_produces_a_tagged_mob(self):
+        """Control — the rollback must not fire on the happy path."""
+        room = _TickLoopFixture.make_room("Happy Room")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        mob = script._spawn_one(self._rule(), room)
+        self.assertEqual(len(self._objects_named("a test mob")), 1)
+        self.assertTrue(mob.tags.get("test_area", category="mob_area"))
+
+    def test_failure_is_reraised_so_the_caller_still_logs_it(self):
+        """Rollback must not swallow the error the caller reports on."""
+        room = _TickLoopFixture.make_room("Reraise Room")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        with mock.patch(
+            "evennia_mob_spawner.script.get_area_tag_category",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                script._spawn_one(self._rule(), room)
