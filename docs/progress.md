@@ -2,6 +2,26 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-24 — 0.1.2: roll back a partial spawn on tagging/attribute failure
+
+`create_object()` commits a mob to the database before any identity tag is stamped. A failure
+partway through tagging or attribute application left that mob in the world wearing none of its
+identity tags — and because population counts are taken by querying those tags, it was invisible to
+them: never counted, never culled, never replaced. The caller catches per-rule and moves on
+(decision #14), so nothing else would clean it up; orphans accumulated silently for the life of the
+database.
+
+`_spawn_one` now wraps tagging through attribute application in `try`/`except`. On failure it
+deletes the partial mob and logs a clean rollback, or `ERROR` if the rollback itself fails (leaving
+an untagged mob visible in the log rather than silent either way), then re-raises so the caller's
+existing per-rule error handling still fires. Patch release, not minor — the fix only touches the
+failure path, doesn't change YAML shape or the success-path tag categories, and `_spawn_one` is
+private.
+
+4 new tests (two failure points, a happy-path control, and re-raise verification). **274 tests
+green** (was 270). README's stale "232 tests green" corrected to 274. Published as
+https://pypi.org/project/evennia-mob-spawner/0.1.2/. Tagged `v0.1.2`.
+
 ## 2026-08-16 — Published to PyPI as `evennia-mob-spawner` 0.1.1
 
 The stalled-state fix below, published: https://pypi.org/project/evennia-mob-spawner/0.1.1/. Version
