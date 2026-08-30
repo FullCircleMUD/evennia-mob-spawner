@@ -52,7 +52,7 @@ When the library is imported outside a running Evennia engine — tests, future 
 
 ## What the library logs
 
-The shim is in place independently of which sites call it. Wiring decisions are tracked in [progress.md](progress.md) as they ship. Candidate sites identified during design discussion:
+The call sites below are wired. New ones are added deliberately, and land in [progress.md](progress.md) as they ship.
 
 - **Spawn-time errors** (decision #14) — when `create_object` or a typeclass's `ms_at_post_spawn()` raises, the surrounding `try / except` logs the error with rule context. The tick continues; one bad rule doesn't take down the script.
 - **Empty `area_tag` queries** (decision #15) — pre-spawn check finds zero rooms matching the rule's `area_tag`. Logged once per occurrence with rule context. Useful for operator-side "why isn't this zone spawning?" debugging.

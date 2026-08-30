@@ -127,6 +127,14 @@ class LogShimSmokeTest(TestCase):
         # contract is "never raise into the caller."
         ms_log("smoke test: unknown level", level="NONSENSE")
 
+    def test_ms_log_is_a_no_op_without_evennia(self):
+        # LOG-05. The import of evennia.utils.logger is lazy precisely so
+        # the library can be called where no engine is bootstrapped (the
+        # ms-validate CLI, tooling). A None entry in sys.modules is what
+        # makes `from ... import log_file` raise ImportError.
+        with mock.patch.dict(sys.modules, {"evennia.utils.logger": None}):
+            self.assertIsNone(ms_log("no engine here", level="ERROR"))
+
     def test_ms_log_valid_levels(self):
         for level in ("INFO", "WARN", "ERROR"):
             ms_log(f"smoke test: level {level}", level=level)
@@ -2188,8 +2196,11 @@ class TickLoopTest(EvenniaWorldTestCase):
         _TickLoopFixture.make_room("Test Room 1")
         script = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
         script.at_repeat()
-        # last_observed_counts should reflect post-spawn population.
-        self.assertEqual(script.db.last_observed_counts.get(1), 1)
+        # The two are stored disjoint: last_observed_counts holds the
+        # headcount as seen in step 1 (0, the world before this tick acted),
+        # and spawned_last_tick holds what the tick then added. Step 2 sums
+        # them next tick.
+        self.assertEqual(script.db.last_observed_counts.get(1), 0)
         self.assertEqual(script.db.spawned_last_tick.get(1), 1)
 
     def test_last_spawn_time_set_after_spawn(self):
@@ -2202,6 +2213,40 @@ class TickLoopTest(EvenniaWorldTestCase):
         self.assertIsNotNone(ts)
         self.assertGreaterEqual(ts, before)
         self.assertLessEqual(ts, after)
+
+    def test_own_spawn_is_not_counted_as_a_death(self):
+        # TICK-15. The `spawned_last_tick` term of the death formula exists
+        # so the script's own spawn — which inflates the population between
+        # one observation and the next — is not read as a kill on the
+        # following tick. A false death stamps last_death_times and, for a
+        # death_cooldown rule, restarts the clock every single tick.
+        _TickLoopFixture.make_room("Test Room 1")
+        script = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=2, max_per_room=2),
+        )
+        script.at_repeat()                      # spawns one
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+        script.at_repeat()                      # nothing died in between
+        self.assertNotIn(
+            1, script.db.last_death_times or {},
+            "the script read its own spawn as a death",
+        )
+
+    def test_first_tick_against_pre_existing_mobs_detects_no_death(self):
+        # TICK-16. Decision #11: a fresh script starts with
+        # last_observed_count = 0, so deaths comes out non-positive when
+        # mobs are already in the world. No special-case branch.
+        room = _TickLoopFixture.make_room("Test Room 1")
+        rule = self._basic_rule(target=1)
+        script = _TickLoopFixture.deploy_rule(rule)
+        script._spawn_one(rule, room)           # pre-existing, tagged mob
+
+        script.at_repeat()                      # the script's first tick
+        self.assertNotIn(
+            1, script.db.last_death_times or {},
+            "a pre-existing population was read as a wave of deaths",
+        )
 
     def test_bad_rule_does_not_break_tick(self):
         # Decision #14: one bad rule doesn't take down the whole tick.
@@ -2494,6 +2539,24 @@ class CliScaffoldSmokeTest(TestCase):
             (Path(tmp) / "index.yaml").write_text("entries: []\n")
             exit_code = validate(["--reader", "local", "--root", tmp])
             self.assertEqual(exit_code, 0)
+
+    def test_a_finding_exits_non_zero(self):
+        """CLI-04. The exit code is the CI gate — a finding must fail it."""
+        import tempfile
+        from pathlib import Path
+        from evennia_mob_spawner.cli import validate
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "definitions.yaml").write_text("levels: []\n")
+            (root / "index.yaml").write_text(
+                "entries:\n  - name: bad\n    kind: file\n"
+            )
+            # rule_id alone — every other required field is missing, so
+            # Tier 1 refuses without needing an engine.
+            (root / "bad.yaml").write_text("rules:\n  - rule_id: 1\n")
+            exit_code = validate(["--reader", "local", "--root", tmp])
+            self.assertEqual(exit_code, 1)
 
 
 class YamlReaderDependencyTest(TestCase):
@@ -3390,6 +3453,36 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
         self.assertEqual(len(self._objects_named("a test mob")), 1)
         self.assertTrue(mob.tags.get("test_area", category="mob_area"))
 
+    def test_a_rollback_that_itself_fails_is_logged_at_error(self):
+        """SPAWN-17. The one case that does leave an orphan must be visible.
+
+        If ``delete()`` fails too, the untagged mob stays in the world —
+        exactly what the rollback exists to prevent. Logging it at ERROR
+        is what stops it being silent as well as invisible.
+        """
+        room = _TickLoopFixture.make_room("Doomed Room")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        captured = []
+
+        with mock.patch(
+            "evennia_mob_spawner.script.ms_log",
+            new=lambda m, level="INFO": captured.append((m, level)),
+        ), mock.patch(
+            "evennia_mob_spawner.script.get_area_tag_category",
+            side_effect=RuntimeError("boom"),
+        ), mock.patch(
+            "evennia.objects.objects.DefaultObject.delete",
+            side_effect=RuntimeError("delete failed too"),
+        ):
+            with self.assertRaises(RuntimeError):
+                script._spawn_one(self._rule(), room)
+
+        errors = [m for m, lvl in captured if lvl == "ERROR"]
+        self.assertTrue(
+            any("rollback failed" in m for m in errors),
+            f"a failed rollback was not reported at ERROR: {captured}",
+        )
+
     def test_failure_is_reraised_so_the_caller_still_logs_it(self):
         """Rollback must not swallow the error the caller reports on."""
         room = _TickLoopFixture.make_room("Reraise Room")
@@ -3400,3 +3493,352 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
         ):
             with self.assertRaises(RuntimeError):
                 script._spawn_one(self._rule(), room)
+
+
+class PickRoomTest(EvenniaWorldTestCase):
+    """``_pick_room``'s three-tier fallback (decision #22).
+
+    Pack -> den -> random, using the first step that yields a room with
+    space. The den and random steps are reached through ``TickLoopTest``;
+    this class covers the pack step and every fall-through edge between
+    them, which the tick tests never reach.
+
+    Each test calls ``_pick_room`` directly — the tick loop would gate on
+    cooldown and target first, and the question here is only which room
+    comes back.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+    LEADER_TYPECLASS = "evennia.objects.objects.DefaultCharacter"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, **overrides):
+        rule = {
+            "rule_id": 1,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def _leader_in(self, room, *, area_tag="test_area"):
+        """A living leader of LEADER_TYPECLASS, tagged into the area."""
+        from evennia.utils.create import create_object
+        leader = create_object(
+            self.LEADER_TYPECLASS, key="the pack leader", location=room,
+        )
+        if area_tag:
+            leader.tags.add(area_tag, category="mob_area")
+        return leader
+
+    def _untagged_room(self, key):
+        """A room outside the rule's area pool.
+
+        Step 3 can never return this room, so a result of this room proves
+        step 1 fired rather than the random fallback happening to agree.
+        """
+        from evennia import DefaultRoom
+        from evennia.utils.create import create_object
+        return create_object(DefaultRoom, key=key)
+
+    def test_pack_step_returns_the_leaders_room(self):
+        # PICK-01.
+        _TickLoopFixture.make_room("Area Room")
+        lair = self._untagged_room("Leader's Room")
+        self._leader_in(lair)
+        script = _TickLoopFixture.deploy_rule(self._rule())
+
+        picked = script._pick_room(
+            self._rule(spawn_with_typeclass=self.LEADER_TYPECLASS)
+        )
+        self.assertEqual(picked, lair)
+
+    def test_no_living_leader_falls_through(self):
+        # PICK-02. Nothing of the leader typeclass exists at all.
+        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+
+        picked = script._pick_room(self._rule(
+            spawn_with_typeclass=self.LEADER_TYPECLASS,
+            den_room_tag="test_den",
+        ))
+        self.assertEqual(picked, den)
+
+    def test_leader_room_at_max_per_room_falls_through(self):
+        # PICK-03. A leader is found, but its room has no space for this
+        # rule — the pack step must not return a full room.
+        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
+        lair = self._untagged_room("Leader's Room")
+        self._leader_in(lair)
+        rule = self._rule(
+            spawn_with_typeclass=self.LEADER_TYPECLASS,
+            den_room_tag="test_den",
+            max_per_room=1,
+        )
+        script = _TickLoopFixture.deploy_rule(rule)
+        script._spawn_one(rule, lair)           # fills the leader's room
+
+        self.assertEqual(script._pick_room(rule), den)
+
+    def test_leader_outside_the_area_tag_is_not_chosen(self):
+        # PICK-04. The pack query is scoped to the rule's area — a leader
+        # of the right typeclass in another area is a different pack.
+        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
+        elsewhere = self._untagged_room("Another Area")
+        self._leader_in(elsewhere, area_tag="some_other_area")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+
+        picked = script._pick_room(self._rule(
+            spawn_with_typeclass=self.LEADER_TYPECLASS,
+            den_room_tag="test_den",
+        ))
+        self.assertEqual(picked, den)
+
+    def test_full_den_falls_through_to_the_area_pool(self):
+        # PICK-06. The den is a preference, not a cap on the rule.
+        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
+        spare = _TickLoopFixture.make_room("Spare Room")
+        rule = self._rule(den_room_tag="test_den", max_per_room=1)
+        script = _TickLoopFixture.deploy_rule(rule)
+        script._spawn_one(rule, den)            # fills the den
+
+        self.assertEqual(script._pick_room(rule), spare)
+
+
+class _HookMob:
+    """Records that ``ms_at_post_spawn`` ran, and when.
+
+    Patched over the spawned mob rather than registered as a typeclass —
+    the library looks the hook up with ``getattr`` on the instance, so a
+    plain attribute is the whole protocol surface.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+
+
+class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
+    """Decision #23's runtime half — the library actually calling the hook.
+
+    Tier 3 validates that a declared ``ms_at_post_spawn`` is callable with
+    the right signature (``RESLV-10``..``RESLV-16``); these cover the call
+    itself, the silence when it is absent, and what happens when it raises.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, **overrides):
+        rule = {
+            "rule_id": 1,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def test_a_declared_hook_is_invoked_after_spawn(self):
+        # SPAWN-18.
+        room = _TickLoopFixture.make_room("Hook Room")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        hook = _HookMob()
+
+        # The hook is looked up on the spawned mob, so it goes on the
+        # rule's typeclass — not on the room.
+        with mock.patch(
+            f"{self.DEFAULT_OBJECT}.ms_at_post_spawn", hook, create=True,
+        ):
+            mob = script._spawn_one(self._rule(), room)
+
+        self.assertEqual(hook.calls, 1)
+        # The hook runs after the mob is fully built: its identity tags
+        # are already stamped by the time it fires.
+        self.assertTrue(mob.tags.get("test_area", category="mob_area"))
+
+    def test_a_typeclass_without_the_hook_is_never_touched(self):
+        # SPAWN-19. The protocol is opt-in; absence is silent, not an error.
+        room = _TickLoopFixture.make_room("Quiet Room")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        captured = []
+
+        with mock.patch(
+            "evennia_mob_spawner.script.ms_log",
+            new=lambda m, level="INFO": captured.append((m, level)),
+        ):
+            mob = script._spawn_one(self._rule(), room)
+
+        self.assertFalse(hasattr(mob, "ms_at_post_spawn"))
+        self.assertEqual(
+            [m for m, lvl in captured if lvl in ("WARN", "ERROR")], [],
+        )
+
+    def test_a_raising_hook_is_logged_and_the_mob_survives(self):
+        # SPAWN-20. The mob is fully built and tagged before the hook runs,
+        # so a consumer bug in the hook must not roll it back — that would
+        # leave the population permanently short with no mob to show for it.
+        room = _TickLoopFixture.make_room("Angry Room")
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        captured = []
+
+        def boom(self):
+            raise RuntimeError("hook exploded")
+
+        with mock.patch(
+            "evennia_mob_spawner.script.ms_log",
+            new=lambda m, level="INFO": captured.append((m, level)),
+        ), mock.patch(
+            f"{self.DEFAULT_OBJECT}.ms_at_post_spawn", boom, create=True,
+        ):
+            mob = script._spawn_one(self._rule(), room)
+
+        self.assertIsNotNone(mob.pk, "a hook failure deleted the mob")
+        errors = [m for m, lvl in captured if lvl == "ERROR"]
+        self.assertTrue(
+            any("ms_at_post_spawn" in m for m in errors),
+            f"a raising hook was not reported at ERROR: {captured}",
+        )
+
+
+class ValidateQueryTest(TestCase):
+    """``Definitions.validate_query`` — the operator's scope, checked early.
+
+    A query naming a level the consumer never declared cannot resolve, and
+    saying so here means the refusal names the level rather than surfacing
+    as a manifest walk that finds nothing.
+    """
+
+    def setUp(self):
+        self.defs = Definitions.from_dict({"levels": ["shard", "zone"]})
+
+    def test_undeclared_level_is_refused(self):
+        # CFG-08.
+        with self.assertRaises(DefinitionsError):
+            self.defs.validate_query({"region": "north"})
+
+    def test_a_contiguous_prefix_is_accepted(self):
+        self.assertIsNone(self.defs.validate_query({"shard": "shard0"}))
+
+    def test_a_skipped_level_is_refused(self):
+        with self.assertRaises(DefinitionsError):
+            self.defs.validate_query({"zone": "millholm"})
+
+
+class ParseArgsTest(TestCase):
+    """``_parse_args`` — the operator-facing half of every command.
+
+    The happy paths are exercised end-to-end through the command tests;
+    these are the refusals, which are the only way a typo becomes a
+    message rather than a traceback.
+    """
+
+    def setUp(self):
+        from evennia_mob_spawner.commands import _parse_args
+        self.parse = _parse_args
+
+    def test_no_scope_token_is_refused(self):
+        # CMD-04. Flags alone are not a scope.
+        with self.assertRaises(ValueError):
+            self.parse("--force-validate")
+
+    def test_a_positional_without_an_equals_is_refused(self):
+        # CMD-05.
+        with self.assertRaises(ValueError):
+            self.parse("shard0")
+
+    def test_an_empty_key_or_value_is_refused(self):
+        # CMD-06. Both sides, since "=x" and "x=" fail differently in the
+        # partition but must give the operator the same answer.
+        with self.assertRaises(ValueError):
+            self.parse("=shard0")
+        with self.assertRaises(ValueError):
+            self.parse("shard=")
+
+
+class OperateCommandBehaviourTest(EvenniaWorldTestCase):
+    """What ``ms_delete`` and ``ms_spawn_report`` actually do.
+
+    Both are covered elsewhere only for which shard gate they carry
+    (``SHARD-24``..``SHARD-26``). These exercise the ``apply`` body — the
+    part an operator sees.
+    """
+
+    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+        for s in MobSpawnerScript.objects.all():
+            s.delete()
+
+    def _rule(self, **overrides):
+        rule = {
+            "rule_id": 1,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 2,
+            "max_per_room": 2,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def test_ms_delete_removes_the_script_row(self):
+        # CMD-10. Unlike ms_stop, nothing survives — the row itself goes.
+        from evennia_mob_spawner.commands import CmdMsDelete
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        script = _TickLoopFixture.deploy_rule(self._rule())
+        messages = []
+        CmdMsDelete().apply(script, messages)
+
+        self.assertEqual(
+            MobSpawnerScript.objects.filter(db_key="test.yaml").count(), 0,
+        )
+        self.assertIn("deleted", " ".join(messages))
+
+    def test_ms_spawn_report_gives_current_against_target_per_rule(self):
+        # CMD-11. The census the status line deliberately omits.
+        from evennia_mob_spawner.commands import CmdMsSpawnReport
+
+        room = _TickLoopFixture.make_room("Census Room")
+        rule = self._rule()
+        script = _TickLoopFixture.deploy_rule(rule)
+        script._spawn_one(rule, room)           # 1 alive against a target of 2
+
+        messages = []
+        CmdMsSpawnReport().apply(script, messages)
+        report = "\n".join(messages)
+
+        self.assertIn("test.yaml", report)
+        self.assertIn("test_area", report)
+        self.assertIn("1", report)
+        self.assertIn("2", report)
+
+    def test_ms_spawn_report_says_so_when_a_script_holds_no_rules(self):
+        from evennia_mob_spawner.commands import CmdMsSpawnReport
+        from evennia.utils.create import create_script
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        script = create_script(MobSpawnerScript, key="empty.yaml")
+        messages = []
+        CmdMsSpawnReport().apply(script, messages)
+        self.assertIn("no rules", " ".join(messages))

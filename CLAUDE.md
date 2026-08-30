@@ -29,6 +29,8 @@ For any non-trivial task, start by reading in this order:
 1. [README.md](README.md) — what the project is, status, quick start.
 2. [docs/INDEX.md](docs/INDEX.md) — map of all design docs.
 3. [docs/architecture.md](docs/architecture.md) — high-level mapping of the spawn system's mechanisms and the library / consumer ownership boundary. Read this before adding to the library's surface area; it captures decisions already pinned and flags the open questions explicitly.
+4. [docs/test-plan.md](docs/test-plan.md) — every case the library covers and the test function covering it. **Any behavioural change starts here**, not in the code.
+
 ## Load-bearing architectural principles
 
 These are the principles every implementation decision must respect. Getting them wrong is expensive to undo.
@@ -46,14 +48,13 @@ Scope boundaries are decided as concrete questions arise, by applying the princi
 
 Areas where scope questions are likely to need explicit decisions (TBD when they arrive):
 
-- Whether the library ships a `wb-validate`-style standalone CLI for local / pre-commit rule validation, in addition to an in-game admin command.
 - Whether the cross-validator (spawn rules ↔ room tags in the consumer's static-content repo) lives in this library, in `evennia-world-builder`, or in the consumer.
-- How the Reader is supplied: depend on `evennia-world-builder`'s Reader, duplicate a minimal Reader here, or let the consumer pass any callable that returns raw YAML.
 - Whether to support conditional spawn gates (time-of-day, population prerequisites, event flags) at the library level, or leave them as consumer-defined `post_spawn_hook` extensions that gate themselves.
 - Whether the library owns initial seeding semantics (populate-on-start vs gradual fill via the tick loop), or leaves that as a per-rule policy.
 
 ## Working conventions
 
+- **Behavioural change starts in the test plan.** Add or amend the case in [docs/test-plan.md](docs/test-plan.md), fill the **Test function** column when the test exists, then implement. Never leave the column stale — it is a coverage claim, and the linter treats a dangling name as an error.
 - **Editing design docs.** Update or add design documents whenever an architectural decision is made or refined. Capture the *why*, not just the *what*. Index new docs in [docs/INDEX.md](docs/INDEX.md).
 - **Don't put implementation detail in this file or README.** Link out to docs/ instead. Keep CLAUDE.md and README.md stable; let docs/ churn.
 - **License.** BSD 3-Clause. Source files carry an SPDX header on the first line (`# SPDX-License-Identifier: BSD-3-Clause`).
@@ -81,7 +82,15 @@ evennia-mob-spawner/
 ├── pyproject.toml
 ├── runtests.py                # standalone test runner (no consumer gamedir needed)
 ├── .gitignore
-├── docs/                    # technical wiki (humans + LLMs)
+├── docs/                      # technical wiki (humans + LLMs)
+│   ├── INDEX.md
+│   ├── architecture.md
+│   ├── test-plan.md
+│   ├── progress.md
+│   ├── interoperability.md
+│   ├── logging.md
+│   ├── shards-compatibility.md
+│   └── archive/
 ├── src/
 │   └── evennia_mob_spawner/   # library code (src layout)
 │       ├── __init__.py
@@ -98,7 +107,8 @@ evennia-mob-spawner/
 - Python 3.10+ (pinned via `pyproject.toml`).
 - Evennia is a runtime dependency (`pip install evennia`).
 - **Tests use Django's test runner via `runtests.py`, not pytest.** No consumer gamedir required. Pattern mirrors `evennia-shards`.
-- YAML parsing: PyYAML (`yaml.safe_load`). Schema validation: hand-written predicates rather than a schema library — same approach as `evennia-world-builder`; rationale to be captured in docs/ when the validator lands.
+- Structural compliance: `python .claude/skills/library-standards-linter/lint_library.py evennia-mob-spawner` from the umbrella root. It validates the test-plan coverage trail too.
+- YAML parsing: PyYAML (`yaml.safe_load`). Schema validation: hand-written predicates rather than a schema library — same approach as `evennia-world-builder`. The tiering and what each tier refuses is in [docs/architecture.md](docs/architecture.md) § Validation tiering and gating.
 - **Two venvs, both gitignored.** The split is load-bearing:
   - `evennia-mob-spawner/venv/` is the library test venv — `runtests.py` runs against this. Install: `evennia`, `evennia-yaml-reader` (editable), and `evennia-mob-spawner` itself (`pip install -e .`). **Do not install `evennia-world-builder` here.** The library is independent of world-builder by architecture (siblings, not stacked); keeping world-builder out of the test venv is what enforces that — any accidental `import evennia_world_builder` in library code fails fast in tests instead of passing silently.
   - `evennia-mob-spawner/examples/venv/` is the demo gamedir venv. Install: the same three plus `evennia-world-builder` (editable). The demo gamedir wires both libraries into `INSTALLED_APPS` to exercise the seam between them in vivo; running `evennia start` from `examples/demo_game/` needs both.

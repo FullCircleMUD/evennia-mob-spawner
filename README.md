@@ -6,7 +6,7 @@ Spawn rules — what typeclass spawns where, how many, how often — are express
 
 ## Status
 
-**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. 274 tests green, live-verified on a two-process sharded deployment against a real consumer game. See [docs/progress.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/progress.md) for the running milestone log.
+**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. 296 tests green, live-verified on a two-process sharded deployment against a real consumer game. See [docs/progress.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/progress.md) for the running milestone log.
 
 ## Is this for me?
 

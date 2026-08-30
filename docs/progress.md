@@ -2,6 +2,48 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-08-30 — the test plan, and the phantom deaths it found
+
+The library predates `docs/test-plan.md` being required, so the plan was written back over the suite
+that already existed: 313 cases across 24 surfaces, every one of the 274 tests mapped to a case ID.
+Writing it is what surfaced the gaps, because a surface with no rows is visible in a way that a
+passing suite is not.
+
+Three gaps were substantive. `_pick_room`'s pack step — the whole `spawn_with_typeclass` branch — had
+never executed in a test; only its shape was validated. `ms_at_post_spawn` was validated for
+callability and signature but never actually invoked, so decision #23's runtime half was unexercised.
+`ms_delete` and `ms_spawn_report` were covered only for which shard gate they carry, never for what
+they do. 16 further proposed cases were struck rather than written: checks asserting a constant
+against itself, and re-covered ground the `LOAD` / `STALL` suites already walk end to end. Their IDs
+are retired, which is what the gaps in the sequences are.
+
+**The tick loop counted its own spawns as deaths.** `TICK-15` was written to pin the
+`spawned_last_tick` term of the death formula and failed on the implementation. Step 7 stored
+`new_observed[rule_id] = current + spawned_count` while recording the same spawn in
+`spawned_last_tick`, so step 2's `deaths = (prior + produced) - current` added it on both sides.
+The error was exact rather than noisy: `deaths` reported precisely the number spawned last tick as
+phantom kills, on every tick following a spawn.
+
+The two stored numbers are meant to be disjoint — the headcount as observed in step 1, and what the
+tick then added — because the library observes before it acts, and step 2 sums them to reconstruct
+the expected population. Folding the spawn into both made them overlap. The other three exit paths in
+`_tick_one_rule` already stored `current` unchanged, so the defect was one branch disagreeing with its
+three siblings, with the attribute's own name, and with architecture.md step 7.
+
+Nothing operator-facing was ever wrong: the population gate, `max_per_room` and room selection all
+take fresh `_count_living()` queries, and `ms_spawn_report` counts live at report time. The only
+consumer of the bad number is `last_death_times`, read solely by `_cooldown_elapsed`'s
+`death_cooldown_seconds` branch — so `respawn_seconds` rules were unaffected, and a `target: 1` boss
+was effectively unaffected too, since the phantom fires while the rule is already at target and a
+genuine kill overwrites the timestamp before it can matter. `death_cooldown_seconds` rules with
+`target > 1` refilled at one mob per cooldown period instead of one per tick.
+
+Fixed by storing `current` as observed. `TICK-12` had pinned the wrong value under the comment "should
+reflect post-spawn population" — the mistaken semantics written down as a test — and now asserts the
+disjoint pair. The attribute docstring described the same wrong reading and was corrected with it.
+
+**296 tests green** (was 274, +22). `library-standards-linter` clean in both directions.
+
 ## 2026-08-24 — 0.1.2: roll back a partial spawn on tagging/attribute failure
 
 `create_object()` commits a mob to the database before any identity tag is stamped. A failure

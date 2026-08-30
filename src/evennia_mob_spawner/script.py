@@ -25,7 +25,8 @@ Persistent state (architecture.md "The tick loop"):
     - ``db.spawn_table``           — list of rule dicts (the YAML rules).
     - ``db.last_spawn_times``      — ``{rule_id: timestamp_of_last_spawn}``.
     - ``db.last_death_times``      — ``{rule_id: timestamp_of_last_observed_death}``.
-    - ``db.last_observed_counts``  — ``{rule_id: count_at_end_of_last_tick}``.
+    - ``db.last_observed_counts``  — ``{rule_id: count_seen_at_last_tick}``, the
+      headcount as taken in step 1, before that tick's own spawn.
     - ``db.spawned_last_tick``     — ``{rule_id: count_spawned_in_prior_tick}``.
 
 The tick loop:
@@ -297,7 +298,13 @@ class MobSpawnerScript(_BASE_SCRIPT):
             spawned_count = 0
 
         # 7. Save state
-        new_observed[rule_id] = current + spawned_count
+        #
+        # ``current`` is stored as observed, WITHOUT this tick's spawn folded
+        # in. The spawn is carried separately in ``new_spawned``, and step 2
+        # adds the two together next tick. Adding it here as well would put it
+        # on both sides of that sum, and the surplus would read as a death
+        # that never happened.
+        new_observed[rule_id] = current
         new_spawned[rule_id] = spawned_count
         if spawned_count:
             last_spawn_times[rule_id] = now

@@ -1,10 +1,11 @@
-# DESIGN Index
+# docs — index
 
-Map of all design documents in this directory, organised by category. Add new documents here when they land — un-indexed documents are invisible.
+Map of all documents in this directory, organised by category. Add new documents here when they land — un-indexed documents are invisible.
 
 ## Process and discipline
 
 - **[progress.md](progress.md)** — running log of milestones with links to evidence.
+- **[test-plan.md](test-plan.md)** — every test case the library commits to covering, and the test function covering it. Any behavioural change starts here.
 
 ## Architecture and design
 
