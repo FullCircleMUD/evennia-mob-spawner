@@ -2,6 +2,28 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-09-12 — logging moves onto evennia-logging-extension
+
+[`log.py`](../src/evennia_mob_spawner/log.py) is now three lines: `ms_log` binds the extension's
+`make_logger` to `mob_spawner.log`. The bound name and the filename are unchanged, so no call site,
+import or patch target moved — 99 references across five modules stayed as they were.
+
+What changes is delivery. The old shim called `evennia.utils.logger.log_file()`, which hands every
+write to `deferToThread`; with no reactor running the deferred is created, never runs, and dies with
+the process. The extension writes synchronously in that window instead, so the pre-reactor paths —
+`AppConfig.ready()`, the `ms-validate` CLI — now land lines rather than discarding them.
+
+The LOG cases were rewritten to prove it. LOG-01 and LOG-03 read the line back from
+`mob_spawner.log` on disk; the four cases they replace asserted only that the call did not raise,
+which passes whether or not anything is ever written. LOG-02 and LOG-05 are retired — level coercion
+belongs to the extension's own suite, and "silent no-op outside a running Evennia" describes a
+contract that no longer exists.
+
+Suite: 294 tests, green. The extension is declared in `pyproject.toml` and editable-installed into
+`venv/`; it is not on PyPI.
+
+Extending logging into the pre-reactor window is separate work, not done here.
+
 ## 2026-08-30 — the test plan, and the phantom deaths it found
 
 The library predates `docs/test-plan.md` being required, so the plan was written back over the suite

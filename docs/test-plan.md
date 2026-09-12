@@ -65,12 +65,23 @@ loop, `_spawn_one`) run against a real test database — `runtests.py` calls `ev
 
 ## LOG — `ms_log`
 
+`ms_log` binds `evennia-logging-extension`'s `make_logger` to this library's own
+`mob_spawner.log`. The mechanism — the reactor branch, the level coercion, the traceback handling —
+belongs to the extension and is covered by the extension's suite. What is pinned here is the
+binding: that a line this library emits reaches the file this library names.
+
+Both cases read the line back from disk. A case that asserts only "the call did not raise" passes
+whether or not anything is ever written, which is how a dead log call survived a full suite in
+`evennia-calendar`.
+
 | ID | Case | Test function |
 |---|---|---|
-| LOG-01 | Callable at the default level without raising | `LogShimSmokeTest.test_ms_log_callable_at_default_level` |
-| LOG-02 | An unknown level is coerced rather than raising | `LogShimSmokeTest.test_ms_log_unknown_level_coerced` |
-| LOG-03 | Each of `INFO` / `WARN` / `ERROR` is accepted | `LogShimSmokeTest.test_ms_log_valid_levels` |
-| LOG-05 | Silent no-op outside a running Evennia, rather than an import error | `LogShimSmokeTest.test_ms_log_is_a_no_op_without_evennia` |
+| LOG-01 | A logged line lands in `mob_spawner.log` under `LOG_DIR` | `LogShimSmokeTest.test_ms_log_writes_to_the_library_log_file` |
+| LOG-03 | A line logged at `WARN` carries `[WARN]` in the file | `LogShimSmokeTest.test_ms_log_carries_the_level_into_the_file` |
+
+Retired: LOG-02 (an unknown level is coerced) — the extension's behaviour, pinned in the extension's
+suite. LOG-05 (silent no-op outside a running Evennia) — no such case exists: without a reactor the
+extension writes synchronously rather than going quiet.
 
 ## PIPE — pipeline scaffold
 

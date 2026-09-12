@@ -10,6 +10,16 @@ calls `create_object` on every tick to place mobs into rooms it locates **by tag
 `[TBD — needs section: evennia-archive was created 2026-08-23 and this entry has not been written.
 See libraries/evennia-archive/docs/interoperability.md for what that library expects.]`
 
+## evennia-logging-extension
+
+**Hard dependency.** Imported unconditionally — `make_logger` in
+[`log.py`](../src/evennia_mob_spawner/log.py), which binds `ms_log` to this library's own
+`mob_spawner.log`. It is the only path by which this library writes a log line.
+
+No constraint travels either way beyond the extension's own install rule: a library import in the
+consumer's settings module goes below `from evennia.settings_default import *`, because that is what
+sets `LOG_DIR`. See [logging.md](logging.md).
+
 ## evennia-mob-spawner
 
 This library.

@@ -6,6 +6,7 @@ the evennia-yaml-reader dependency is wired up. Real tests land alongside
 the spawn-rule pipeline as it is built out.
 """
 
+import os
 import sys
 import time
 import types
@@ -114,30 +115,56 @@ class PackageSmokeTest(TestCase):
         self.assertEqual(evennia_mob_spawner.__version__, "0.1.2")
 
 
+MOB_SPAWNER_LOG = "mob_spawner.log"
+
+
+def clear_logs():
+    """Empty LOG_DIR's files, so a line read back was written by this test.
+
+    Truncated, never removed: Evennia's ``_open_log_file`` caches the handle
+    after the first write, and removing the file leaves that handle appending
+    to an unlinked inode — every later line silently vanishes. An append-mode
+    handle seeks to the end on each write, so a truncated file stays live.
+    """
+    for name in os.listdir(settings.LOG_DIR):
+        if name.endswith(".log"):
+            with open(os.path.join(settings.LOG_DIR, name), "w"):
+                pass
+
+
+def read_back_log(filename):
+    """Return one log file's contents from LOG_DIR, or "" if it never appeared."""
+    path = os.path.join(settings.LOG_DIR, filename)
+    if not os.path.exists(path):
+        return ""
+    with open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 class LogShimSmokeTest(TestCase):
-    """ms_log is importable and callable without raising."""
+    """The binding reaches this library's own log file.
 
-    def test_ms_log_callable_at_default_level(self):
-        # Must not raise even if Evennia logger isn't fully bootstrapped
-        # in this test context (the shim swallows ImportError silently).
-        ms_log("smoke test: default level")
+    Delivery is read back from disk rather than asserted through a mock. A
+    call that raises nothing proves nothing about whether a line landed —
+    which is how a dead log call survived a full suite in evennia-calendar.
 
-    def test_ms_log_unknown_level_coerced(self):
-        # Unknown levels degrade to INFO rather than rejecting — the shim
-        # contract is "never raise into the caller."
-        ms_log("smoke test: unknown level", level="NONSENSE")
+    The mechanism itself belongs to evennia-logging-extension and is covered
+    by that library's suite; what these pin is the binding.
+    """
 
-    def test_ms_log_is_a_no_op_without_evennia(self):
-        # LOG-05. The import of evennia.utils.logger is lazy precisely so
-        # the library can be called where no engine is bootstrapped (the
-        # ms-validate CLI, tooling). A None entry in sys.modules is what
-        # makes `from ... import log_file` raise ImportError.
-        with mock.patch.dict(sys.modules, {"evennia.utils.logger": None}):
-            self.assertIsNone(ms_log("no engine here", level="ERROR"))
+    def test_ms_log_writes_to_the_library_log_file(self):
+        """LOG-01"""
+        clear_logs()
+        ms_log("smoke test: delivery")
+        self.assertIn("smoke test: delivery", read_back_log(MOB_SPAWNER_LOG))
 
-    def test_ms_log_valid_levels(self):
-        for level in ("INFO", "WARN", "ERROR"):
-            ms_log(f"smoke test: level {level}", level=level)
+    def test_ms_log_carries_the_level_into_the_file(self):
+        """LOG-03"""
+        clear_logs()
+        ms_log("smoke test: level path", level="WARN")
+        logged = read_back_log(MOB_SPAWNER_LOG)
+        self.assertIn("[WARN]", logged)
+        self.assertIn("smoke test: level path", logged)
 
 
 class PipelineScaffoldSmokeTest(EvenniaWorldTestCase):

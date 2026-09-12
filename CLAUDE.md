@@ -94,6 +94,7 @@ evennia-mob-spawner/
 ├── src/
 │   └── evennia_mob_spawner/   # library code (src layout)
 │       ├── __init__.py
+│       ├── log.py             # binds ms_log to mob_spawner.log via evennia-logging-extension
 │       └── tests.py           # unit tests, run via runtests.py
 ├── tests/                     # standalone test infrastructure
 │   ├── __init__.py
