@@ -10,10 +10,8 @@ from dataclasses import dataclass
 
 from evennia_yaml_reader import Reader
 
+from .config import _DEFINITIONS_PATH
 from .errors import DefinitionsError
-
-
-_DEFINITIONS_PATH = "definitions.yaml"
 
 
 @dataclass(frozen=True)

@@ -57,7 +57,13 @@ from django.conf import settings
 from evennia.typeclasses.attributes import AttributeProperty
 from evennia.utils.utils import class_from_module
 
-from .config import get_area_tag_category, get_tick_seconds
+from .config import (
+    _FILE_TAG_CATEGORY,
+    _MS_AT_POST_SPAWN_ATTR,
+    _RULE_TAG_CATEGORY,
+    get_area_tag_category,
+    get_tick_seconds,
+)
 from .log import ms_log
 from .validator import _normalise_tag
 
@@ -66,18 +72,20 @@ from .validator import _normalise_tag
 # evennia.DefaultScript if BASE_SCRIPT_TYPECLASS is missing or unset
 # (defensive — the setting is typically present in any standard
 # Evennia configuration).
+#
+# This is the one constant that cannot live in config.py, and the reason is
+# import ordering rather than preference. config.py is imported from
+# __init__.py, so it runs the moment anything imports the package — which,
+# because the library sits in INSTALLED_APPS, is during django.setup() while
+# the app registry is still being populated. Resolving an Evennia typeclass
+# there raises AppRegistryNotReady: class_from_module reaches DefaultScript,
+# which reaches evennia.utils.dbserialize, which imports ContentType, whose
+# model definition calls apps.check_apps_ready(). Tried and confirmed, not
+# assumed. script.py is imported later, after Evennia is up, which is why the
+# same call is safe here.
 _BASE_SCRIPT = class_from_module(
     getattr(settings, "BASE_SCRIPT_TYPECLASS", "evennia.DefaultScript")
 )
-
-
-_MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
-
-# Tag categories stamped on every spawned mob. Together with ``area_tag``
-# they form the queryable identity breadcrumb on each mob: which rule
-# produced it, and which rule-set file that rule lives in.
-_RULE_TAG_CATEGORY = "mob_spawner_rule"
-_FILE_TAG_CATEGORY = "mob_spawner_file"
 
 
 def _persists_as_attribute(obj, attr_name):

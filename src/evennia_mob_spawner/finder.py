@@ -14,14 +14,9 @@ from dataclasses import dataclass
 
 from evennia_yaml_reader import Reader, ReaderNotFoundError
 
+from .config import _INDEX_FILENAME, _KIND_FILE, _KIND_FOLDER, _VALID_KINDS
 from .definitions import Definitions
 from .errors import FinderManifestError, FinderQueryError
-
-
-_INDEX_FILENAME = "index.yaml"
-_KIND_FOLDER = "folder"
-_KIND_FILE = "file"
-_VALID_KINDS = (_KIND_FOLDER, _KIND_FILE)
 
 
 @dataclass(frozen=True)

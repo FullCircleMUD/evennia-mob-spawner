@@ -58,7 +58,10 @@ except ImportError:
         return fn
 
 from .config import (
+    FORCE_VALIDATE_FLAG,
     SHARD_LEVEL,
+    _ALL_TOKEN,
+    _STATE_COLOURS,
     active_shard_id,
     get_configured_reader,
     is_shard_process,
@@ -80,10 +83,6 @@ from .finder import Finder
 from .loader import Loader
 from .log import ms_log
 from .validator import Validator
-
-
-_ALL_TOKEN = "all"
-FORCE_VALIDATE_FLAG = "force-validate"
 
 
 def check_shard_scope(query: dict, command_key: str = "ms_load") -> str | None:
@@ -633,14 +632,6 @@ def _is_stalled(script) -> bool:
         and not script.db._paused_time
         and not script.ndb._task
     )
-
-
-_STATE_COLOURS = {
-    "active": "|g",   # ticking
-    "paused": "|y",   # not running, and someone meant it
-    "stopped": "|y",
-    "stalled": "|r",  # not running, and nobody meant it
-}
 
 
 def _colour_state(state: str) -> str:

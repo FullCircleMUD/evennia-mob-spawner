@@ -41,13 +41,15 @@ import importlib
 import inspect
 from dataclasses import dataclass
 
+from .config import (
+    _MS_AT_POST_SPAWN_ATTR,
+    _RESERVED_TAG_CATEGORY_PREFIX,
+    _TAG_DICT_ALLOWED_KEYS,
+)
 from .definitions import Definitions
 from .errors import ValidatorError
 from .loader import LoadResult
 from .log import ms_log
-
-
-_MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
 
 
 @dataclass(frozen=True)
@@ -436,19 +438,6 @@ def _check_den_room_tag_well_formed(loaded: LoadedRule) -> str | None:
     if not value.strip():
         return f"{loaded.path}: 'den_room_tag' must be a non-empty string"
     return None
-
-
-# Tag entries accept the same shapes Evennia's TagHandler.add() does:
-# bare string (untyped tag), dict with `key` only (untyped tag), or
-# dict with both `key` and `category` (categorised tag). ``data=`` is
-# not exposed in YAML (matches world-builder's choice).
-_TAG_DICT_ALLOWED_KEYS = frozenset({"key", "category"})
-
-# Library-reserved tag categories that authors cannot stamp from YAML.
-# Anything under this prefix is owned by the library (identity tags
-# stamped at spawn time); allowing authors to spoof these would
-# corrupt the (file, rule_id) population discriminator.
-_RESERVED_TAG_CATEGORY_PREFIX = "mob_spawner_"
 
 
 def _normalise_tag(entry):

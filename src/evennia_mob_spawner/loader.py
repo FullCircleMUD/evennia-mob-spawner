@@ -36,13 +36,8 @@ from .errors import (
     LoaderMissingEntryError,
     LoaderMissingIndexError,
 )
+from .config import _INDEX_FILENAME, _KIND_FILE, _KIND_FOLDER, _RULES_KEY
 from .finder import FoundLocation
-
-
-_INDEX_FILENAME = "index.yaml"
-_KIND_FOLDER = "folder"
-_KIND_FILE = "file"
-_RULES_KEY = "rules"
 
 
 @dataclass(frozen=True)

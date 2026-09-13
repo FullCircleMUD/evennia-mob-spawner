@@ -129,3 +129,61 @@ def is_shard_process() -> bool:
         return False
 
     return get_role() == ROLE_SHARD
+
+
+# ---------------------------------------------------------------------------
+# Constants
+#
+# Every module-level constant the library declares lives here, and every other
+# module imports it from here — so a session about to declare one finds the
+# existing name rather than minting a second for the same value.
+# ---------------------------------------------------------------------------
+
+# --- The shape of a rule-set source ---------------------------------------
+
+_DEFINITIONS_PATH = "definitions.yaml"
+_INDEX_FILENAME = "index.yaml"
+_RULES_KEY = "rules"
+
+# An index entry is one of these two kinds. Read by both the Finder, which
+# walks the index to resolve a query, and the Loader, which reads it again to
+# decide whether to descend or parse.
+_KIND_FOLDER = "folder"
+_KIND_FILE = "file"
+_VALID_KINDS = (_KIND_FOLDER, _KIND_FILE)
+
+# --- The command surface ---------------------------------------------------
+
+_ALL_TOKEN = "all"
+FORCE_VALIDATE_FLAG = "force-validate"
+
+_STATE_COLOURS = {
+    "active": "|g",   # ticking
+    "paused": "|y",   # not running, and someone meant it
+    "stopped": "|y",
+    "stalled": "|r",  # not running, and nobody meant it
+}
+
+# --- The typeclass protocol, and what the library stamps -------------------
+
+# The one optional protocol surface: a typeclass defining this method has it
+# invoked after spawn, and one that doesn't is unaffected.
+_MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
+
+# Tag categories stamped on every spawned mob. Together with ``area_tag``
+# they form the queryable identity breadcrumb on each mob: which rule
+# produced it, and which rule-set file that rule lives in.
+_RULE_TAG_CATEGORY = "mob_spawner_rule"
+_FILE_TAG_CATEGORY = "mob_spawner_file"
+
+# Library-reserved tag categories that authors cannot stamp from YAML.
+# Anything under this prefix is owned by the library — the two identity
+# categories above are under it — and allowing authors to spoof these would
+# corrupt the (file, rule_id) population discriminator.
+_RESERVED_TAG_CATEGORY_PREFIX = "mob_spawner_"
+
+# Tag entries accept the same shapes Evennia's TagHandler.add() does:
+# bare string (untyped tag), dict with `key` only (untyped tag), or
+# dict with both `key` and `category` (categorised tag). ``data=`` is
+# not exposed in YAML (matches world-builder's choice).
+_TAG_DICT_ALLOWED_KEYS = frozenset({"key", "category"})

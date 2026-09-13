@@ -2,6 +2,31 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-09-12 — the constants gather in config.py
+
+Eighteen module-level constants moved out of `commands.py`, `definitions.py`, `finder.py`,
+`loader.py`, `script.py` and `validator.py` and into [`config.py`](../src/evennia_mob_spawner/config.py),
+which every other module now imports them from. Names are unchanged, so no call site moved.
+
+**Four of them were declared twice.** `_INDEX_FILENAME`, `_KIND_FOLDER` and `_KIND_FILE` each existed
+independently in both `finder.py` and `loader.py`, and `_MS_AT_POST_SPAWN_ATTR` in both `script.py`
+and `validator.py` — same values, neither copy aware of the other. That is the duplication the rule
+exists to prevent, already present. Nineteen declarations became fifteen names.
+
+Gathering them also put `_RESERVED_TAG_CATEGORY_PREFIX` next to `_RULE_TAG_CATEGORY` and
+`_FILE_TAG_CATEGORY` for the first time, where it is visible that the reserved prefix is the prefix of
+the two categories it protects.
+
+**`_BASE_SCRIPT` stays in `script.py`, and that is now settled rather than outstanding.** Moving it
+was tried and fails: `config.py` is imported from `__init__.py`, so it runs during `django.setup()`
+while the app registry is still populating, and resolving an Evennia typeclass there raises
+`AppRegistryNotReady`. The chain and the evidence are in the comment at the declaration. The linter
+will keep reporting one `constant_outside_config` for it.
+
+Suite: 294 tests, green. The demo gamedir boots and `ms_log` still reaches `mob_spawner.log` live,
+which is what proves the reshuffled import graph holds under a real app registry rather than only
+under the test runner.
+
 ## 2026-09-12 — logging moves onto evennia-logging-extension
 
 [`log.py`](../src/evennia_mob_spawner/log.py) is now three lines: `ms_log` binds the extension's
