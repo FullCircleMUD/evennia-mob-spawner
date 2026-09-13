@@ -1,0 +1,45 @@
+# Millholm — shard0's rule set. Spawns into rooms tagged `millholm` (and
+# `millholm_deep`) under the `mob_area` category, which world/demo_rooms.py
+# stamps on this instance's rooms only.
+rules:
+  # The everyday population. Rat carries ms_at_post_spawn, so every rat
+  # spawned here has `post_spawn_ran = True` on it — the one optional
+  # protocol surface the library offers, visible from `examine`.
+  - rule_id: 1
+    typeclass: typeclasses.demo_mobs.Rat
+    key: a brown rat
+    desc: It watches you with wet black eyes.
+    area_tag: millholm
+    target: 6
+    max_per_room: 2
+    respawn_seconds: 20
+    tags:
+      - vermin
+
+  # A second rule over the same area tag, so the two populations are
+  # counted separately despite sharing rooms. Identity is (file, rule_id),
+  # never the typeclass or the area tag.
+  - rule_id: 2
+    typeclass: typeclasses.demo_mobs.Wolf
+    key: a lean wolf
+    desc: Ribs show through a grey pelt.
+    area_tag: millholm
+    target: 2
+    max_per_room: 1
+    respawn_seconds: 45
+    tags:
+      - predator
+
+  # One boss, in the deep rooms only. A narrower area tag is how a rule is
+  # confined to part of a zone — there is one room carrying `millholm_deep`,
+  # so this rule can only ever place one mob.
+  - rule_id: 3
+    typeclass: typeclasses.demo_mobs.Boss
+    key: the Cellar King
+    desc: Something far too large for a cellar.
+    area_tag: millholm_deep
+    target: 1
+    max_per_room: 1
+    respawn_seconds: 120
+    attrs:
+      hp: 200

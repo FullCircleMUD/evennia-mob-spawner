@@ -88,6 +88,11 @@ Scaling runs each instance on its own Evennia database, and no instance can see 
 what the gates are for: a rule set belongs to one instance, and the commands that deploy or operate on
 it only reach the instance running them.
 
+`examples/scaling_demo/` is a working deployment of everything below — a router and two shards, a rule
+set each. It is the executable reference for this section: the prose can go quietly stale, the demo
+cannot, because it boots. It is also the only place the real imports in `config.py` run; the library's
+own suite injects stand-ins.
+
 **Detection is the import.** Scaling has no single-instance mode and refuses to boot an instance whose
 `SCALING_ROLE` is neither `router` nor `shard`, so an import that succeeds on a running server means a
 multi-instance deployment. The instance id is multiplex's `MULTIPLEX_INSTANCE_ID`, read through

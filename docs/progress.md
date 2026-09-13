@@ -2,6 +2,45 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-09-13 — the scaling integration runs, and is verified in a live deployment
+
+`examples/scaling_demo/` is a router and two shards, each on its own Evennia database, each with its
+own rule set under `rules/`. It follows `evennia-scaling`'s own demo layout: one source tree in
+`router/`, the shards symlinked back to it and owning only their `server/` directory, and the archive
+and message-bus databases symlinked to the router's as stand-in shared storage.
+
+**This closes the caveat on the entry below.** That conversion was unverified against anything
+running, because the suite injects stand-in `evennia_scaling` and `evennia_portal_multiplex` modules
+into `sys.modules`. The four real imports in `config.py` now execute here, and detection works: the
+router reported its own instance id through multiplex and its role through scaling.
+
+Verified over real telnet sessions against the three running instances:
+
+- **Every gate, both directions.** On the router, `ms_load shard=shard0`, `ms_load shard=router` and
+  `ms_load all` all refused — the second by role, which is SHARD-32 and the case an id comparison
+  alone would have passed. On shard0, `shard=shard0` deploys and `shard=shard1` is refused; on shard1
+  the mirror image.
+- **Populations reach target and respect the tags.** shard0 filled to 6 rats, 2 wolves and 1 boss
+  across four `millholm` rooms; shard1 to 4 wolves and 2 rats across two `wilds` rooms. The untagged
+  room on each shard stayed empty. `ms_at_post_spawn` fired on 6 of 6 rats.
+- **Instances cannot see each other.** On shard1, `MobSpawnerScript.objects.all()` is empty while
+  shard0's script is deployed and ticking, and the mob count is 0 against shard0's 9. Deleting and
+  reloading shard1's script left shard0 untouched. This is what replaced the `owning_shard` stamp,
+  and it holds: a script exists only where it was deployed.
+- **The command lifecycle.** `ms_stop` → paused, `ms_restart` → active, `ms_delete` → gone,
+  `ms_load` → back. `ms_spawn_report` raises, and the operator gets the traceback that raising from a
+  command's `func()` produces.
+
+**Not exercised live: death and respawn.** No mob was killed, so neither cooldown form, the tick-time
+count-delta death detection, nor the state-preserving upsert path of `ms_load` onto a script already
+deployed has run under scaling. The unit suite covers all of it; a live deployment has not.
+
+Two notes for whoever runs the demo next, both in its
+[README](../examples/scaling_demo/README.md). Account #1 never leaves the router — `is_instance_root`
+keeps it there — so shard work needs a second superuser. And a fresh login re-resolves where `ic`
+lands, so reaching shard1 has to happen in one unbroken session; measuring which instance you are on
+in the same session as the command is what keeps a reading honest.
+
 ## 2026-09-12 — the command gates move to `evennia-scaling`
 
 The optional integration is scaling, not shards. The question the gates answer is unchanged — is this

@@ -1,0 +1,10 @@
+# Level names from outermost folder inward. Co-installed with
+# evennia-scaling the first one MUST be `shard`, and its value is the
+# instance id — ms_load refuses the whole repo otherwise, once
+# definitions.yaml is parsed. Level names are otherwise ours to choose.
+levels: [shard, zone]
+
+# False, so ms_load pre-validates the whole repo before every load. A demo
+# has no CI to trust, and setting this true is a claim about a deploy
+# pipeline rather than a speed knob.
+repo-ci-pre-validation: false

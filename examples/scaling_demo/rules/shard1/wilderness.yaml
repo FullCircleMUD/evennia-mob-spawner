@@ -1,0 +1,27 @@
+# Wilderness — shard1's rule set. Spawns into rooms tagged `wilds`, which
+# exist on shard1 and nowhere else.
+#
+# Deploying this on shard0 is refused by the scope gate, not discovered by
+# finding no rooms: `ms_load shard=shard1` run on shard0 never reaches the
+# manifest.
+rules:
+  - rule_id: 1
+    typeclass: typeclasses.demo_mobs.Wolf
+    key: a grey wolf
+    desc: It has been watching you longer than you have been watching it.
+    area_tag: wilds
+    target: 4
+    max_per_room: 2
+    respawn_seconds: 20
+    tags:
+      - predator
+
+  # Death-cooldown rather than respawn: the clock starts when one dies, not
+  # when one spawns. Exactly one of the two is required per rule.
+  - rule_id: 2
+    typeclass: typeclasses.demo_mobs.Rat
+    key: a mangy rat
+    area_tag: wilds
+    target: 2
+    max_per_room: 1
+    death_cooldown_seconds: 30

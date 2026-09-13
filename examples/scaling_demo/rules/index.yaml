@@ -1,0 +1,9 @@
+# The first level: one folder per instance, named exactly as that
+# instance's MULTIPLEX_INSTANCE_ID. A name here that no instance answers to
+# is a rule set nothing can ever deploy — `ms_load shard=<name>` would be
+# refused everywhere, because no process is that instance.
+entries:
+  - name: shard0
+    kind: folder
+  - name: shard1
+    kind: folder

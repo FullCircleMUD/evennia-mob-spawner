@@ -1,0 +1,33 @@
+# Everything the three-instance demo needs, into one venv all of them run from.
+#
+# Run from this directory — pip resolves the -e paths below relative to the
+# working directory, not to this file:
+#
+#     python3 -m venv venv
+#     ./venv/bin/pip install -r requirements.txt
+
+evennia
+
+# macOS only, and load-bearing. Apple's system SQLite drives
+# sqlite3_initialize() through libdispatch, which does not survive the fork
+# `evennia start` uses to daemonize — the server then deadlocks on its first
+# query, silently, with nothing in any log. sqlean.py ships its own
+# statically-linked SQLite and settings_common.py swaps it in.
+sqlean.py; sys_platform == "darwin"
+
+# The scaling chain, editable, deepest first. None are on PyPI, so nothing
+# resolves anything for us and every link is named explicitly — the cascade
+# and the logging extension arrive through the archive and the bus rather
+# than through anything scaling itself imports.
+-e ../../../evennia-logging-extension
+-e ../../../evennia-database-cascade
+-e ../../../evennia-portal-multiplex
+-e ../../../evennia-archive
+-e ../../../evennia-message-bus
+-e ../../../evennia-scaling
+
+# The mob-spawner chain. The logging extension above is shared with it.
+-e ../../../evennia-yaml-reader
+
+# The library under test, editable from the checkout two levels up.
+-e ../..

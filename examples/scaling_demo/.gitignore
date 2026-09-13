@@ -1,0 +1,9 @@
+# The demo venv and everything three running instances produce.
+venv/
+*/server/*.db3
+*/server/logs/
+*/server/*.pid
+*/server/.static/
+*/server/conf/secret_settings.py
+__pycache__/
+*.pyc

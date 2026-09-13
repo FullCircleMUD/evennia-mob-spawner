@@ -134,20 +134,29 @@ evennia-mob-spawner/
 │   ├── test_settings.py
 │   └── urls.py
 └── examples/                  # demo gamedirs for integration testing
-    ├── requirements.txt       # the demo venv: evennia, sqlean on macOS, the siblings editable
-    └── demo_game/             # the gamedir; venv/ beside it, both gitignored
+    ├── requirements.txt       # the single-instance venv: evennia, sqlean on macOS, siblings editable
+    ├── demo_game/             # one instance, standalone; venv/ beside it, both gitignored
+    └── scaling_demo/          # router + shard0 + shard1 under evennia-scaling
+        ├── README.md          # build, run, and what to look at
+        ├── requirements.txt   # its own venv, adding the whole scaling chain
+        ├── make_superuser.py  # Account #1 without the launcher's prompt
+        ├── rules/             # one rule set per shard, read by all three
+        ├── router/            # the whole source tree; shards symlink back to it
+        ├── shard0/            # own server/ only
+        └── shard1/            # own server/ only
 ```
 
 ## Tools and environment
 
 - Python 3.10+ (pinned via `pyproject.toml`).
 - Evennia is a runtime dependency (`pip install evennia`).
-- **Tests use Django's test runner via `runtests.py`, not pytest.** No consumer gamedir required, and no sibling library installed — the `evennia-scaling` integration is exercised by injecting stand-in modules into `sys.modules`, so the real import path has never run in tests.
+- **Tests use Django's test runner via `runtests.py`, not pytest.** No consumer gamedir required, and no sibling library installed — the `evennia-scaling` integration is exercised by injecting stand-in modules into `sys.modules`, so the real import path does not run in the suite. `examples/scaling_demo/` is where it does.
 - Structural compliance: `python .claude/skills/library-standards-linter/lint_library.py evennia-mob-spawner` from the umbrella root. It validates the test-plan coverage trail too.
 - YAML parsing: PyYAML (`yaml.safe_load`). Schema validation: hand-written predicates rather than a schema library — same approach as `evennia-world-builder`. The tiering and what each tier refuses is in [docs/architecture.md](docs/architecture.md) § Validation tiering and gating.
-- **Two venvs, both gitignored.** The split is load-bearing:
+- **Three venvs, all gitignored.** The first split is load-bearing; the third is a separate demo:
   - `evennia-mob-spawner/venv/` is the library test venv — `runtests.py` runs against this. Install: `evennia`, `evennia-yaml-reader` and `evennia-logging-extension` (both editable), and `evennia-mob-spawner` itself (`pip install -e .`). **Do not install `evennia-world-builder` here.** The library is independent of world-builder by architecture (siblings, not stacked); keeping world-builder out of the test venv is what enforces that — any accidental `import evennia_world_builder` in library code fails fast in tests instead of passing silently.
   - `evennia-mob-spawner/examples/venv/` is the demo gamedir venv, built from [examples/requirements.txt](examples/requirements.txt): `./venv/bin/pip install -r requirements.txt` from `examples/`. It adds `evennia-world-builder` (editable) — the demo wires both content libraries into `INSTALLED_APPS` to exercise the seam between them in vivo — and `sqlean.py` on macOS.
+  - `evennia-mob-spawner/examples/scaling_demo/venv/` is the three-instance demo's, built from [examples/scaling_demo/requirements.txt](examples/scaling_demo/requirements.txt). It adds the whole `evennia-scaling` chain — multiplex, archive, message-bus, cascade — which the other two deliberately do not carry. **This is where the `evennia-scaling` integration is exercised for real**: the library's own suite injects stand-in modules into `sys.modules`, so the four real imports in `config.py` run here and nowhere else. See [examples/scaling_demo/README.md](examples/scaling_demo/README.md).
 - **macOS: the demo gamedir needs `sqlean.py`, and it is load-bearing.** macOS's system SQLite initialises through libdispatch, which does not survive `fork()`, so a daemonized `evennia start` deadlocks on the child's first SQLite call — silently, with no error and no timeout. The `darwin` block at the top of `examples/demo_game/server/conf/settings.py` swaps in the bundled build, and it only works if `sqlean.py` is actually installed in the venv: the block is a `try`/`except ImportError` and goes quiet otherwise. A demo that hangs after "Portal starting server ..." with nothing in `server.log` after the reactor line is this.
 
 ## Sibling libraries to reference
