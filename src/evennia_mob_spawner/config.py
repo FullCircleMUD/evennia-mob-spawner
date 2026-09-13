@@ -90,51 +90,54 @@ def get_configured_reader():
 
 
 SHARD_LEVEL = "shard"
-"""The level name that carries the shard id when co-installed with shards.
+"""The level name that carries the instance id when co-installed with scaling.
 
 Level names are otherwise consumer-chosen. This is the one naming rule the
-shards pairing imposes, and it is what lets ``ms_load`` tell which shard a
-rule set belongs to. See docs/interoperability.md.
+scaling pairing imposes, and it is what lets ``ms_load`` tell which instance a
+rule set belongs to. The word matches scaling's own vocabulary — its roles are
+``router`` and ``shard`` — so a consumer's ``definitions.yaml`` says what
+scaling's settings say. See docs/interoperability.md.
 """
 
 
 def active_shard_id() -> str | None:
-    """Return this process's shard id, or ``None`` if not sharded.
+    """Return this instance's id, or ``None`` when running standalone.
 
-    "Sharded" means the shards library is installed **and** the role is not
-    ``monolith`` — a successful import is not the test, because monolith is
-    a non-sharded install where no shard context is ever set. Returning
-    ``None`` is the signal for callers to skip every shard check and behave
-    exactly as they do standalone.
+    Installed is the whole test: scaling has no single-instance mode, and it
+    refuses to boot an instance whose ``SCALING_ROLE`` is neither role, so an
+    import that succeeds on a running server means a multi-instance
+    deployment. ``None`` is the signal for callers to skip every instance
+    check and behave exactly as they do standalone.
+
+    The id is multiplex's. Scaling mints none of its own and reads that one
+    everywhere, so a second source for the same fact would only give the two
+    somewhere to disagree.
     """
     try:
-        from evennia_shards import ROLE_MONOLITH, get_role, get_shard_id
+        import evennia_scaling  # noqa: F401 — presence is the test
+        from evennia_portal_multiplex.config import get_instance_id
     except ImportError:
         return None
 
-    if get_role() == ROLE_MONOLITH:
-        return None
-    return get_shard_id()
+    return get_instance_id()
 
 
-def is_shard_process() -> bool:
-    """True only when this process is a shard.
+def is_router_process() -> bool:
+    """True only when this instance is the router.
 
-    Distinct from :func:`active_shard_id`, which answers "is sharding in
-    play at all". This answers "is this process's ORM narrowed to one
-    shard's rows" — the condition that makes a cluster-wide question
-    unanswerable here.
+    The router holds no game world, so no rule set can deploy there. It is
+    refused by role rather than by an id that never matches: under scaling
+    ``SCALING_ROUTER_ID`` is an arbitrary name, so a rule-set folder can be
+    named after it and would otherwise pass the id check.
 
-    False for the router (runs unscoped), for monolith (a non-sharded
-    install — no shard context is ever set), and when shards isn't
-    installed (no filter exists). See docs/interoperability.md.
+    False when scaling isn't installed — a standalone game has no router.
     """
     try:
-        from evennia_shards import ROLE_SHARD, get_role
+        from evennia_scaling.config import ROLE_ROUTER, get_role
     except ImportError:
         return False
 
-    return get_role() == ROLE_SHARD
+    return get_role() == ROLE_ROUTER
 
 
 # ---------------------------------------------------------------------------

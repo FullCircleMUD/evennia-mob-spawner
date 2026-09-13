@@ -55,9 +55,9 @@ from evennia_mob_spawner.commands import (
     FORCE_VALIDATE_FLAG,
     SHARD_LEVEL,
     active_shard_id,
-    check_cluster_wide_scope,
     check_shard_levels,
     check_shard_scope,
+    is_router_process,
     should_pre_validate,
 )
 from evennia_mob_spawner.commands import _is_stalled, check_scope_not_stalled
@@ -557,75 +557,121 @@ class ShouldPreValidateTest(TestCase):
         ))
 
 
-def _fake_shards(role: str, shard_id):
-    """A stand-in ``evennia_shards`` exposing only what the gate imports.
-
-    The library's own test venv deliberately has no shards install, so the
-    co-installed paths are exercised by injecting this into ``sys.modules``.
-    """
-    mod = types.ModuleType("evennia_shards")
-    mod.ROLE_MONOLITH = "monolith"
-    mod.get_role = lambda: role
-    mod.get_shard_id = lambda: shard_id
+def _fake_module(name: str, **attrs):
+    """A stand-in module exposing only the names detection imports."""
+    mod = types.ModuleType(name)
+    for key, value in attrs.items():
+        setattr(mod, key, value)
     return mod
 
 
+def _scaled_as(role: str, instance_id: str):
+    """Stand this process up as a scaling instance, for the duration.
+
+    The library's own test venv deliberately installs neither sibling, so
+    the co-installed paths are exercised by injection. Both packages and
+    their ``config`` submodules are supplied: ``from a.b import c`` resolves
+    the parent as well as the module itself.
+
+    The two halves come from different libraries by design — scaling mints
+    no instance id of its own and reads multiplex's, so a second setting
+    for the same fact would only give the two somewhere to disagree.
+    """
+    return mock.patch.dict(sys.modules, {
+        "evennia_scaling": _fake_module("evennia_scaling"),
+        "evennia_scaling.config": _fake_module(
+            "evennia_scaling.config",
+            ROLE_ROUTER="router",
+            ROLE_SHARD="shard",
+            get_role=lambda: role,
+        ),
+        "evennia_portal_multiplex": _fake_module("evennia_portal_multiplex"),
+        "evennia_portal_multiplex.config": _fake_module(
+            "evennia_portal_multiplex.config",
+            get_instance_id=lambda: instance_id,
+        ),
+    })
+
+
+def _not_scaled():
+    """The standalone case: a None entry makes the import raise."""
+    return mock.patch.dict(sys.modules, {
+        "evennia_scaling": None,
+        "evennia_scaling.config": None,
+    })
+
+
 class ActiveShardIdTest(TestCase):
-    """Detection: installed *and* not monolith, not merely importable."""
+    """Detection: this instance's id, or None when scaling is absent."""
 
-    def test_shards_not_installed_is_not_sharded(self):
-        # A None entry in sys.modules makes the import raise, which is the
-        # standalone case: no shards, no checks.
-        with mock.patch.dict(sys.modules, {"evennia_shards": None}):
+    def test_scaling_not_installed_is_standalone(self):
+        with _not_scaled():
             self.assertIsNone(active_shard_id())
 
-    def test_monolith_role_is_not_sharded(self):
-        # Monolith is a non-sharded install — the import succeeding is not
-        # enough, or the library would start refusing scopes on a game that
-        # has no shards at all.
-        fake = _fake_shards(role="monolith", shard_id=None)
-        with mock.patch.dict(sys.modules, {"evennia_shards": fake}):
-            self.assertIsNone(active_shard_id())
-
-    def test_shard_role_reports_its_shard_id(self):
-        fake = _fake_shards(role="shard", shard_id="shard0")
-        with mock.patch.dict(sys.modules, {"evennia_shards": fake}):
+    def test_shard_instance_reports_its_instance_id(self):
+        with _scaled_as(role="shard", instance_id="shard0"):
             self.assertEqual(active_shard_id(), "shard0")
 
-    def test_router_role_reports_its_own_id(self):
-        # The router is "sharded" for gate purposes: it has an id, and that
-        # id never matches a content shard, which is what refuses ms_load
-        # there without a role check of its own.
-        fake = _fake_shards(role="router", shard_id="router")
-        with mock.patch.dict(sys.modules, {"evennia_shards": fake}):
-            self.assertEqual(active_shard_id(), "router")
+    def test_router_instance_reports_its_instance_id(self):
+        # The router has an id like any other instance. Nothing here
+        # refuses it — that is is_router_process's job, because a router
+        # id is an arbitrary name and may match a rule set's.
+        with _scaled_as(role="router", instance_id="hub"):
+            self.assertEqual(active_shard_id(), "hub")
+
+
+class IsRouterProcessTest(TestCase):
+    """The role check that keeps rule sets off the router."""
+
+    def test_scaling_not_installed_is_not_router(self):
+        # A standalone game has no router to be.
+        with _not_scaled():
+            self.assertFalse(is_router_process())
+
+    def test_shard_instance_is_not_router(self):
+        with _scaled_as(role="shard", instance_id="shard0"):
+            self.assertFalse(is_router_process())
+
+    def test_router_instance_is_router(self):
+        with _scaled_as(role="router", instance_id="hub"):
+            self.assertTrue(is_router_process())
 
 
 class CheckShardScopeTest(TestCase):
-    """The ms_load shard gate. Every refusal is a no-op off a shard."""
+    """The ms_load gate. Every refusal is a no-op off a scaled deployment."""
 
-    def _as(self, shard_id):
-        return mock.patch(
-            "evennia_mob_spawner.commands.active_shard_id",
-            return_value=shard_id,
+    @staticmethod
+    def _as(instance_id, router=False):
+        """Stand the *gate* up as `instance_id`, optionally as the router.
+
+        Patched at the gate rather than through `sys.modules`, so a failure
+        here is the gate's logic rather than the detection underneath it —
+        that is `ActiveShardIdTest`'s and `IsRouterProcessTest`'s to cover.
+        """
+        return mock.patch.multiple(
+            "evennia_mob_spawner.commands",
+            active_shard_id=mock.Mock(return_value=instance_id),
+            is_router_process=mock.Mock(return_value=router),
         )
 
-    # --- not a sharded deployment: nothing is refused ----------------
+    # --- not a scaled deployment: nothing is refused ------------------
 
-    def test_unsharded_allows_all_scope(self):
+    def test_standalone_allows_all_scope(self):
         with self._as(None):
             self.assertIsNone(check_shard_scope({}))
 
-    def test_unsharded_allows_any_query(self):
+    def test_standalone_allows_any_query(self):
         # Including one naming a shard level, which is just an ordinary
-        # consumer-chosen level name when shards isn't in play.
+        # consumer-chosen level name when scaling isn't in play.
         with self._as(None):
             self.assertIsNone(check_shard_scope({SHARD_LEVEL: "shard9"}))
             self.assertIsNone(check_shard_scope({"zone": "millholm"}))
 
-    # --- sharded: the three refusals ---------------------------------
+    # --- scaled: the refusals -----------------------------------------
 
-    def test_all_scope_refused_when_sharded(self):
+    def test_all_scope_refused_when_scaled(self):
+        # `all` spans the whole YAML manifest, which holds every instance's
+        # rule sets — so it would deploy another instance's rules here.
         with self._as("shard0"):
             refusal = check_shard_scope({})
         self.assertIsNotNone(refusal)
@@ -653,10 +699,17 @@ class CheckShardScopeTest(TestCase):
         self.assertIsNotNone(refusal)
 
     def test_router_refused_for_content_shard(self):
-        # The load-bearing case: deploying shard0's rules from the router
-        # is what produced unstamped mobs.
-        with self._as("router"):
+        # The router holds no game world, so no rule set deploys there.
+        with self._as("hub", router=True):
             self.assertIsNotNone(check_shard_scope({SHARD_LEVEL: "shard0"}))
+
+    def test_router_refused_for_its_own_instance_id(self):
+        # Refused by role, not by an id that never matches. Under scaling
+        # SCALING_ROUTER_ID is an arbitrary name, so a rule-set folder can
+        # be named after it — and an id check alone would let it through,
+        # deploying scripts into the instance that holds no world.
+        with self._as("hub", router=True):
+            self.assertIsNotNone(check_shard_scope({SHARD_LEVEL: "hub"}))
 
     def test_refusals_name_no_specific_shard(self):
         # Messages are generic by decision: interpolating shard ids led to
@@ -680,40 +733,6 @@ class CheckShardScopeTest(TestCase):
             }))
 
 
-class CheckClusterWideScopeTest(TestCase):
-    """Whole-world commands are refused on a shard, and only on a shard."""
-
-    def _role(self, role):
-        return mock.patch(
-            "evennia_mob_spawner.commands.is_shard_process",
-            return_value=(role == "shard"),
-        )
-
-    def test_shard_is_refused(self):
-        # The only role whose ORM is narrowed — its census would be a
-        # confident count of the wrong world.
-        with self._role("shard"):
-            refusal = check_cluster_wide_scope("ms_spawn_report")
-        self.assertIsNotNone(refusal)
-        self.assertIn("router", refusal)
-
-    def test_router_is_allowed(self):
-        # Runs unscoped, so it is the only process that can answer for the
-        # whole world — including rows left unstamped.
-        with self._role("router"):
-            self.assertIsNone(check_cluster_wide_scope("ms_spawn_report"))
-
-    def test_monolith_is_allowed(self):
-        # A non-sharded install: the single process is the whole world.
-        with self._role("monolith"):
-            self.assertIsNone(check_cluster_wide_scope("ms_spawn_report"))
-
-    def test_standalone_is_allowed(self):
-        # shards not installed — no auto-filter exists to narrow anything.
-        with self._role(None):
-            self.assertIsNone(check_cluster_wide_scope("ms_spawn_report"))
-
-
 class CheckShardLevelsTest(TestCase):
     """The mandate check: definitions.yaml must declare `shard` first."""
 
@@ -726,8 +745,8 @@ class CheckShardLevelsTest(TestCase):
             return_value=shard_id,
         )
 
-    def test_unsharded_accepts_any_levels(self):
-        # Level names are consumer-chosen off a sharded deployment.
+    def test_standalone_accepts_any_levels(self):
+        # Level names are consumer-chosen off a scaled deployment.
         with self._as(None):
             self.assertIsNone(check_shard_levels(self._defs(["zone", "area"])))
 
@@ -3126,34 +3145,29 @@ class CommandScopeGateTest(TestCase):
         from evennia_mob_spawner.commands import (
             CmdMsDelete,
             CmdMsRestart,
-            CmdMsSpawnReport,
             CmdMsStatus,
             CmdMsStop,
         )
-        return CmdMsStop, CmdMsDelete, CmdMsRestart, CmdMsStatus, CmdMsSpawnReport
+        return CmdMsStop, CmdMsDelete, CmdMsRestart, CmdMsStatus
 
     def test_commands_touching_the_live_task_are_shard_scoped(self):
         # pause() and delete() both reach for ndb._task, which exists only
         # in the process running the script — so a broad scope would act on
-        # this shard's share while reporting a clean sweep of all of them.
+        # this instance's share while reporting a clean sweep of all of them.
         # ms_status only reads that task, but reading it off-process would
         # report every foreign script as stalled, so it carries the gate too.
-        stop, delete, restart, status, report = self._cmds()
-        for cmd in (stop, delete, restart, status):
+        for cmd in self._cmds():
             self.assertTrue(cmd.shard_scoped, f"{cmd.key} should be shard-scoped")
 
-    def test_the_census_is_not_shard_scoped(self):
-        # ms_spawn_report carries the cluster-wide gate instead — its counts
-        # run under the tenancy auto-filter, so only an unscoped process can
-        # answer for the whole world.
-        _stop, _delete, _restart, _status, report = self._cmds()
-        self.assertFalse(report.shard_scoped)
+    def test_the_census_raises_not_implemented(self):
+        # Gutted deliberately. Under scaling each instance holds its own
+        # database, so a whole-world census has no process that can answer
+        # it. What the command should become is open, and a report that
+        # quietly answered for one instance would read as the whole world.
+        from evennia_mob_spawner.commands import CmdMsSpawnReport
 
-    def test_only_the_census_is_cluster_wide(self):
-        stop, delete, restart, status, report = self._cmds()
-        self.assertTrue(report.cluster_wide_only)
-        for cmd in (stop, delete, restart, status):
-            self.assertFalse(cmd.cluster_wide_only)
+        with self.assertRaises(NotImplementedError):
+            CmdMsSpawnReport().func()
 
     def test_refusal_names_the_invoking_command(self):
         # The gate is shared, so its messages must not hardcode ms_load.
@@ -3927,30 +3941,3 @@ class OperateCommandBehaviourTest(EvenniaWorldTestCase):
         )
         self.assertIn("deleted", " ".join(messages))
 
-    def test_ms_spawn_report_gives_current_against_target_per_rule(self):
-        # CMD-11. The census the status line deliberately omits.
-        from evennia_mob_spawner.commands import CmdMsSpawnReport
-
-        room = _TickLoopFixture.make_room("Census Room")
-        rule = self._rule()
-        script = _TickLoopFixture.deploy_rule(rule)
-        script._spawn_one(rule, room)           # 1 alive against a target of 2
-
-        messages = []
-        CmdMsSpawnReport().apply(script, messages)
-        report = "\n".join(messages)
-
-        self.assertIn("test.yaml", report)
-        self.assertIn("test_area", report)
-        self.assertIn("1", report)
-        self.assertIn("2", report)
-
-    def test_ms_spawn_report_says_so_when_a_script_holds_no_rules(self):
-        from evennia_mob_spawner.commands import CmdMsSpawnReport
-        from evennia.utils.create import create_script
-        from evennia_mob_spawner.script import MobSpawnerScript
-
-        script = create_script(MobSpawnerScript, key="empty.yaml")
-        messages = []
-        CmdMsSpawnReport().apply(script, messages)
-        self.assertIn("no rules", " ".join(messages))

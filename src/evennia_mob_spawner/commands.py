@@ -47,22 +47,6 @@ from evennia.utils.utils import run_async
 
 from evennia_yaml_reader import ReaderError
 
-# Optional integration with evennia-shards. When the shards library is
-# installed and configured, ``preserve_tenant_context`` captures the
-# active tenant at wrap time and re-applies it inside the deferred
-# worker thread — without this, ObjectDB rows (the per-room
-# MobSpawnerScript script-host objects) created in the worker would
-# land ``shard_id=NULL`` because multitenant's threading.local tenant
-# doesn't propagate across the ``run_async`` thread spawn. When the
-# shards library isn't installed, the import fails and we fall back
-# to an identity passthrough that's a no-op. See
-# ``evennia-shards/docs/tenancy.md`` for the helper's contract.
-try:
-    from evennia_shards import preserve_tenant_context
-except ImportError:
-    def preserve_tenant_context(fn):
-        return fn
-
 from .config import (
     FORCE_VALIDATE_FLAG,
     SHARD_LEVEL,
@@ -70,7 +54,7 @@ from .config import (
     _STATE_COLOURS,
     active_shard_id,
     get_configured_reader,
-    is_shard_process,
+    is_router_process,
 )
 from .definitions import Definitions
 from .deployer import Deployer
@@ -94,20 +78,23 @@ from .validator import Validator
 def check_shard_scope(query: dict, command_key: str = "ms_load") -> str | None:
     """Return an operator-facing refusal, or ``None`` if the scope is fine.
 
-    Three refusals, all no-ops off a sharded deployment:
+    Four refusals, all no-ops off a scaled deployment:
 
-    - the whole-world scope, which spans every shard's rule sets and so can
-      only ever be partly correct on one process;
+    - the whole-world scope. The YAML manifest holds every instance's rule
+      sets, so ``all`` here would deploy another instance's rules into this
+      one;
+    - the router, which holds no game world. Refused by role rather than by
+      an id that never matches: ``SCALING_ROUTER_ID`` is an arbitrary name,
+      so a rule-set folder can be named after it and would otherwise pass
+      the id check below;
     - a query that doesn't name the shard level at all;
-    - a query naming a shard this process doesn't own. The router's
-      ``SHARD_ID`` is mandated to be ``"router"``, so this rejects the
-      command there without needing a role check of its own.
+    - a query naming an instance this one isn't.
 
-    Applies to any command whose effect is confined to the process running
-    it. Deploying is one such: ``ms_load`` only reaches this process's
+    Applies to any command whose effect is confined to the instance running
+    it. Deploying is one such: ``ms_load`` only reaches this instance's
     scripts. So is anything touching a script's live ``ndb._task``, which
     exists only where the script runs — a broad scope there would stop or
-    remove one shard's share while reporting a clean sweep of all of them.
+    remove one instance's share while reporting a clean sweep of all of them.
     """
     shard_id = active_shard_id()
     if shard_id is None:
@@ -115,8 +102,14 @@ def check_shard_scope(query: dict, command_key: str = "ms_load") -> str | None:
 
     if not query:
         return (
-            f"{command_key}: `{_ALL_TOKEN}` is not available on a sharded "
+            f"{command_key}: `{_ALL_TOKEN}` is not available on a scaled "
             f"deployment. Run this one shard at a time."
+        )
+
+    if is_router_process():
+        return (
+            f"{command_key}: the router holds no game world, so no rule set "
+            f"deploys there. Run this from the shard it acts on."
         )
 
     if next(iter(query)) != SHARD_LEVEL:
@@ -128,47 +121,15 @@ def check_shard_scope(query: dict, command_key: str = "ms_load") -> str | None:
     return None
 
 
-def check_cluster_wide_scope(command_key: str) -> str | None:
-    """Refuse a whole-world command on a process that can only see part of it.
-
-    Some commands answer a question about the entire world rather than about
-    one shard's slice. Under the tenancy auto-filter a shard process sees
-    only its own rows, so the answer it produces is not a partial answer
-    flagged as such — it is a confident, wrongly-scoped one. A shard
-    reporting on another shard's script counts zero of a live population.
-
-    **Why this collapses to "refuse only on a shard".** There are three
-    roles, and only one of them narrows the ORM:
-
-    - *router* — runs unscoped, so it sees every shard's rows plus any
-      orphaned ones. The only process that can answer for the whole world.
-    - *monolith* — a non-sharded install by definition; no shard context is
-      ever set, and the single process is the whole world.
-    - *shards not installed* — no auto-filter exists at all.
-
-    So rather than enumerating "router or monolith or standalone", the check
-    is the single negative case: this process is a shard. Anything else can
-    see the whole world, whether because it is unscoped or because there is
-    only one world to see.
-    """
-    if not is_shard_process():
-        return None
-
-    return (
-        f"{command_key}: reports across the whole world, so it can only be "
-        f"run from the router."
-    )
-
-
 def check_shard_levels(definitions) -> str | None:
     """Return a refusal if the shard level was never adopted, else ``None``.
 
     Checked once ``definitions.yaml`` is parsed, because that is the first
     point the declared levels are known. Nothing else catches this: a
-    consumer who co-installs shards but keeps their own level names has a
+    consumer who co-installs scaling but keeps their own level names has a
     query that validates perfectly against their own declarations, so the
     breach would otherwise surface only as a confusing "not a declared
-    level" error. No-op off a sharded deployment.
+    level" error. No-op off a scaled deployment.
     """
     if active_shard_id() is None:
         return None
@@ -346,15 +307,9 @@ class CmdMsLoad(BaseCommand):
         # be called from the worker safely; the at_return / at_err
         # callbacks fire back on the reactor and flush the collected
         # message list there.
-        #
-        # The pipeline callable is wrapped with preserve_tenant_context
-        # so any shards-tenant active on the reactor thread carries
-        # into the worker — without it, every Script row created in
-        # the worker would land unstamped. No-op when shards isn't
-        # installed (see top-of-file import).
         self.caller.msg(f"ms_load {args} : running async (gameplay continues)…")
         run_async(
-            preserve_tenant_context(self._run_pipeline), query, flags,
+            self._run_pipeline, query, flags,
             at_return=self._on_async_return,
             at_err=self._on_async_err,
         )
@@ -738,30 +693,22 @@ class _MsOperateBase(BaseCommand):
     help_category = "Mob Spawner"
     op_label = "op"
 
-    cluster_wide_only = False
-    """Set on subclasses whose answer covers the whole world, not one shard.
-
-    Such a command is refused on a shard process — see
-    :func:`check_cluster_wide_scope`.
-    """
-
     shard_scoped = False
-    """Set on subclasses whose effect stops at the process running them.
+    """Set on subclasses whose effect stops at the instance running them.
 
     Evennia keeps a script's ``LoopingCall`` in ``ndb._task``, which exists
     only in the process running it, so an operation reaching for that task
-    can only act on this shard's share:
+    can only act on this instance's share:
 
     - ``pause()`` reads ``ndb._task`` and, finding none, writes nothing at
       all — run from elsewhere it silently does nothing while reporting
       success.
-    - ``delete()`` stops only the local task before removing the shared
-      row, leaving the owning shard ticking a script that no longer exists.
+    - ``delete()`` stops only the local task before removing the row.
 
     So these carry the same scope gate as ``ms_load``: the whole-world
-    scope is refused, and the query must name this shard. Stopping "all"
-    from one shard would halt its own scripts while every other shard kept
-    ticking — a partial action reported as a complete one.
+    scope is refused, and the query must name this instance. Stopping "all"
+    from one instance would halt its own scripts while every other instance
+    kept ticking — a partial action reported as a complete one.
     """
 
     def func(self):
@@ -772,12 +719,6 @@ class _MsOperateBase(BaseCommand):
                 f"every script, or a query like `{self.key} shard=shard0`."
             )
             return
-
-        if self.cluster_wide_only:
-            refusal = check_cluster_wide_scope(self.key)
-            if refusal:
-                self.caller.msg(refusal)
-                return
 
         try:
             query, flags = _parse_args(args)
@@ -793,13 +734,9 @@ class _MsOperateBase(BaseCommand):
 
         # Reader is needed only when the query is non-empty (manifest
         # walk). For `all`, we go straight to the DB.
-        #
-        # preserve_tenant_context wrap mirrors the ms_load site above —
-        # any shards-tenant on the reactor thread carries into the
-        # worker. No-op when shards isn't installed.
         self.caller.msg(f"{self.key} {args} : running async (gameplay continues)…")
         run_async(
-            preserve_tenant_context(self._run), query, flags,
+            self._run, query, flags,
             at_return=self._on_async_return,
             at_err=self._on_async_err,
         )
@@ -1060,92 +997,45 @@ class CmdMsStatus(_MsOperateBase):
 
 
 class CmdMsSpawnReport(_MsOperateBase):
-    """Population census of mobs spawned by matching scripts.
+    """Population census of mobs spawned by matching scripts. Not available.
 
     Usage:
         ms_spawn_report all
         ms_spawn_report <level>=<value> [<level>=<value> ...]
 
-    For each script in scope, walks the rule table and emits per-rule
-    current-vs-target counts, grouped by ``area_tag``. Per-area
-    subtotals and a per-script total are appended. Under-target rules
-    are marked with a trailing ``*`` for scanability.
+    **Gutted deliberately, and the question is open.** The census counted
+    through ``ObjectDB``, which under a shared database meant one unscoped
+    process could answer for the whole world. Under ``evennia-scaling``
+    every instance holds its own database and no process can see another,
+    so there is nothing left to run a whole-world count on.
 
-    Counts are live: each rule does a tag-indexed ``COUNT`` query
-    (``_count_living``) at report time. State of the script
-    (active / paused / stopped) is shown as context but does NOT filter
-    which scripts are reported — a paused script with ``current=0`` is
-    exactly the kind of thing the report is meant to surface.
+    A per-instance census is not the same command wearing a different hat:
+    run on one shard it is a complete, correct answer about that shard, and
+    an operator who asked "is my world populated?" would read it as an
+    answer about the world. Refusing is the honest state until the shape is
+    decided — whether that is a per-instance report that says so in its own
+    output, an aggregate collected over ``evennia-message-bus``, or neither.
 
-    The report deliberately answers only "what mobs exist?". For
-    "why is this rule under target?" (cooldown state, etc.) use
-    ``ms_status``. Splitting the two keeps each output focused.
+    What it did, for whoever picks it up: for each script in scope it walked
+    the rule table and emitted per-rule current-vs-target counts grouped by
+    ``area_tag``, with per-area subtotals and a per-script total, marking
+    under-target rules with a trailing ``*``. Counts were live, one
+    tag-indexed ``COUNT`` per rule via ``_count_living``. Script state was
+    shown as context but never filtered the listing — a paused script with
+    ``current=0`` is exactly what the report existed to surface. It answered
+    only "what mobs exist?"; "why is this rule under target?" is
+    ``ms_status``, and splitting the two kept each output focused.
     """
 
     key = "ms_spawn_report"
     op_label = "report"
 
-    # A census of the whole world, not of one shard's slice. On a shard the
-    # auto-filter would silently narrow the counts — a shard reporting on
-    # another shard's script counts zero of a live population. The router
-    # sees every row, including any left unstamped.
-    cluster_wide_only = True
-
-    def apply(self, script, messages: list) -> None:
-        state = _script_state(script)
-        rules = script.spawn_table
-
-        if not rules:
-            messages.append(f"  {script.db_key}: {state}, no rules")
-            return
-
-        messages.append(f"  {script.db_key}: {state}")
-
-        # Group rules by area_tag, preserving rule order within each
-        # group. Python dicts preserve insertion order, which we want
-        # here so author-controlled rule order in YAML carries through.
-        by_area: dict = {}
-        for rule in rules:
-            by_area.setdefault(rule["area_tag"], []).append(rule)
-
-        script_target = 0
-        script_current = 0
-        for area_tag, area_rules in by_area.items():
-            messages.append(f"    {area_tag}:")
-            area_target = 0
-            area_current = 0
-            for rule in area_rules:
-                target = rule["target"]
-                try:
-                    current = script._count_living(rule)
-                except Exception as e:
-                    # Decision #14 sibling: per-rule errors don't kill
-                    # the whole report; log and surface the failure.
-                    msg = (
-                        f"      rule_id={rule.get('rule_id')} "
-                        f"count failed: {e}"
-                    )
-                    messages.append(msg)
-                    ms_log(
-                        f"ms_spawn_report: {script.db_key} "
-                        f"rule_id={rule.get('rule_id')}: {e}",
-                        level="ERROR",
-                    )
-                    continue
-
-                marker = "  *" if current < target else ""
-                messages.append(
-                    f"      rule_id={rule['rule_id']} "
-                    f"key={rule['key']!r} "
-                    f"target={target} current={current}{marker}"
-                )
-                area_target += target
-                area_current += current
-
-            messages.append(
-                f"      subtotal: {area_current}/{area_target}"
-            )
-            script_target += area_target
-            script_current += area_current
-
-        messages.append(f"    totals: {script_current}/{script_target}")
+    def func(self):
+        # Raised before the base class dispatches to a worker thread. That
+        # dispatch has an error handler which turns any exception into
+        # "command crashed unexpectedly", so raising further in would hide
+        # this behind a message saying nothing about why.
+        raise NotImplementedError(
+            "ms_spawn_report has no whole-world database to count under "
+            "evennia-scaling. See the class docstring."
+        )

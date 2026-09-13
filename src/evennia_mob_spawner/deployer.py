@@ -135,40 +135,13 @@ class Deployer:
 
         existing = MobSpawnerScript.objects.filter(db_key=path).first()
         if existing is not None:
-            self._stamp_owning_shard(existing)
             return existing
 
-        script = create_script(
+        # No ownership stamp: under evennia-scaling each instance has its
+        # own ScriptDB, so a script exists only where it was deployed and
+        # ticks only there. Confinement is structural rather than declared.
+        return create_script(
             typeclass=MobSpawnerScript,
             key=path,
             persistent=True,
         )
-        self._stamp_owning_shard(script)
-        return script
-
-    @staticmethod
-    def _stamp_owning_shard(script) -> None:
-        """Declare which shard owns `script`, when running sharded.
-
-        ``ms_load`` only runs on the process that owns the scope, so the
-        shard this deploy is happening on *is* the owning shard. The shards
-        library reads this Attribute to confine the script's ticks to that
-        process — without it, the row is visible to every process and each
-        attaches its own ``LoopingCall``.
-
-        No-op off a sharded deployment: nothing is stamped, and an unstamped
-        script is unconfined, which is correct because the only way to be
-        unstamped is to have been created where sharding wasn't in play.
-        """
-        from .config import active_shard_id
-
-        shard_id = active_shard_id()
-        if shard_id is None:
-            return
-
-        try:
-            from evennia_shards import OWNING_SHARD_ATTR
-        except ImportError:
-            return
-
-        script.attributes.add(OWNING_SHARD_ATTR, shard_id)

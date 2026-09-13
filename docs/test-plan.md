@@ -24,7 +24,7 @@ All test functions live in `src/evennia_mob_spawner/tests.py`, run via `python r
 | `RESLV` | Tier 3 — engine-runtime resolvability |
 | `DIAG` | Tier 4 — deploy-time diagnostics |
 | `GATE` | `should_pre_validate` — the validation gating decision |
-| `SHARD` | Shard gates on the command surface |
+| `SHARD` | Instance gates on the command surface |
 | `STATE` | `MobSpawnerScript`'s persistent state — how it is declared and stored |
 | `DEP` | `Deployer` — upsert, state preservation, purge |
 | `TICK` | The tick loop (`at_repeat` / `_tick_one_rule`) |
@@ -332,48 +332,59 @@ The 2×2 of the `repo-ci-pre-validation` setting against `--force-validate`.
 | GATE-04 | Setting false, flag → pre-validate | `ShouldPreValidateTest.test_setting_false_with_flag_runs_pre_validation` |
 | GATE-05 | An unrelated flag does not trigger the override | `ShouldPreValidateTest.test_unrelated_flags_do_not_trigger` |
 
-## SHARD — shard gates
+## SHARD — instance gates
 
-`evennia-shards` is an optional integration; every gate must no-op when it is absent.
+`evennia-scaling` is an optional integration; every gate must no-op when it is absent. Scaling runs
+each instance on its own database, so the gates answer one question: is this the instance the rule set
+names? An instance's id is multiplex's `MULTIPLEX_INSTANCE_ID` — scaling mints none of its own — and
+its role is scaling's `SCALING_ROLE`, either `shard` or `router`.
 
-### Detection
+The level name stays `shard`, matching scaling's own vocabulary (`SCALING_SHARDS`, `SCALING_ROLE`), so
+a consumer's `definitions.yaml` is unchanged.
+
+Retired IDs, not reused: SHARD-02 (`monolith`, a role scaling does not have), SHARD-15..18 and
+SHARD-26 (`check_cluster_wide_scope`, deleted with the census).
+
+### Detection — `active_shard_id`
 
 | ID | Case | Test function |
 |---|---|---|
-| SHARD-01 | Shards not installed reads as not sharded | `ActiveShardIdTest.test_shards_not_installed_is_not_sharded` |
-| SHARD-02 | The `monolith` role reads as not sharded — installed is not enough | `ActiveShardIdTest.test_monolith_role_is_not_sharded` |
-| SHARD-03 | A shard role reports its own shard id | `ActiveShardIdTest.test_shard_role_reports_its_shard_id` |
-| SHARD-04 | The router reports its own id, so it fails a shard match without a role check | `ActiveShardIdTest.test_router_role_reports_its_own_id` |
+| SHARD-01 | Scaling not installed reads as standalone | `ActiveShardIdTest.test_scaling_not_installed_is_standalone` |
+| SHARD-03 | A shard instance reports its own instance id | `ActiveShardIdTest.test_shard_instance_reports_its_instance_id` |
+| SHARD-04 | A router instance reports its own instance id | `ActiveShardIdTest.test_router_instance_reports_its_instance_id` |
+
+### Detection — `is_router_process`
+
+The router is refused by role rather than by an id that never matches. Under scaling
+`SCALING_ROUTER_ID` is an arbitrary name, so a rule-set folder can be named after it (SHARD-32).
+
+| ID | Case | Test function |
+|---|---|---|
+| SHARD-29 | Scaling not installed is not a router process | `IsRouterProcessTest.test_scaling_not_installed_is_not_router` |
+| SHARD-30 | A shard instance is not a router process | `IsRouterProcessTest.test_shard_instance_is_not_router` |
+| SHARD-31 | A router instance is a router process | `IsRouterProcessTest.test_router_instance_is_router` |
 
 ### `check_shard_scope` — the `ms_load` gate
 
 | ID | Case | Test function |
 |---|---|---|
-| SHARD-05 | Unsharded allows the `all` scope | `CheckShardScopeTest.test_unsharded_allows_all_scope` |
-| SHARD-06 | Unsharded allows any query | `CheckShardScopeTest.test_unsharded_allows_any_query` |
-| SHARD-07 | `all` is refused on a sharded deployment | `CheckShardScopeTest.test_all_scope_refused_when_sharded` |
+| SHARD-05 | Standalone allows the `all` scope | `CheckShardScopeTest.test_standalone_allows_all_scope` |
+| SHARD-06 | Standalone allows any query | `CheckShardScopeTest.test_standalone_allows_any_query` |
+| SHARD-07 | `all` is refused on a scaled deployment — the manifest spans every instance | `CheckShardScopeTest.test_all_scope_refused_when_scaled` |
 | SHARD-08 | A query not starting with `shard=` is refused | `CheckShardScopeTest.test_query_not_starting_with_shard_refused` |
 | SHARD-09 | `shard` present but not first is refused | `CheckShardScopeTest.test_shard_present_but_not_first_refused` |
-| SHARD-10 | A foreign shard is refused | `CheckShardScopeTest.test_foreign_shard_refused` |
+| SHARD-10 | A foreign instance is refused | `CheckShardScopeTest.test_foreign_shard_refused` |
 | SHARD-11 | The router is refused for a content shard's scope | `CheckShardScopeTest.test_router_refused_for_content_shard` |
-| SHARD-12 | Refusals name no specific shard — the operator isn't sent to a wrong process | `CheckShardScopeTest.test_refusals_name_no_specific_shard` |
-| SHARD-13 | The process's own shard is allowed | `CheckShardScopeTest.test_own_shard_allowed` |
-| SHARD-14 | The own shard is allowed with a deeper scope | `CheckShardScopeTest.test_own_shard_allowed_with_deeper_scope` |
-
-### `check_cluster_wide_scope` — the census gate
-
-| ID | Case | Test function |
-|---|---|---|
-| SHARD-15 | A shard is refused — it can only see its own share | `CheckClusterWideScopeTest.test_shard_is_refused` |
-| SHARD-16 | The router is allowed | `CheckClusterWideScopeTest.test_router_is_allowed` |
-| SHARD-17 | Monolith is allowed | `CheckClusterWideScopeTest.test_monolith_is_allowed` |
-| SHARD-18 | Standalone is allowed | `CheckClusterWideScopeTest.test_standalone_is_allowed` |
+| SHARD-32 | The router is refused for a scope naming its own instance id | `CheckShardScopeTest.test_router_refused_for_its_own_instance_id` |
+| SHARD-12 | Refusals name no specific instance — the operator isn't sent to a wrong process | `CheckShardScopeTest.test_refusals_name_no_specific_shard` |
+| SHARD-13 | The process's own instance is allowed | `CheckShardScopeTest.test_own_shard_allowed` |
+| SHARD-14 | The own instance is allowed with a deeper scope | `CheckShardScopeTest.test_own_shard_allowed_with_deeper_scope` |
 
 ### `check_shard_levels` — the definitions mandate
 
 | ID | Case | Test function |
 |---|---|---|
-| SHARD-19 | Unsharded accepts any declared levels | `CheckShardLevelsTest.test_unsharded_accepts_any_levels` |
+| SHARD-19 | Standalone accepts any declared levels | `CheckShardLevelsTest.test_standalone_accepts_any_levels` |
 | SHARD-20 | `shard` declared first is accepted | `CheckShardLevelsTest.test_shard_first_accepted` |
 | SHARD-21 | A consumer keeping their own level names is refused | `CheckShardLevelsTest.test_mandate_not_adopted_refused` |
 | SHARD-22 | `shard` declared but not first is refused | `CheckShardLevelsTest.test_shard_declared_but_not_first_refused` |
@@ -384,8 +395,7 @@ The 2×2 of the `repo-ci-pre-validation` setting against `--force-validate`.
 | ID | Case | Test function |
 |---|---|---|
 | SHARD-24 | Commands touching the live task are shard-scoped | `CommandScopeGateTest.test_commands_touching_the_live_task_are_shard_scoped` |
-| SHARD-25 | The census is not shard-scoped | `CommandScopeGateTest.test_the_census_is_not_shard_scoped` |
-| SHARD-26 | Only the census is cluster-wide | `CommandScopeGateTest.test_only_the_census_is_cluster_wide` |
+| SHARD-25 | `ms_spawn_report` raises `NotImplementedError` rather than counting | `CommandScopeGateTest.test_the_census_raises_not_implemented` |
 | SHARD-27 | A refusal names the invoking command, not a hard-coded one | `CommandScopeGateTest.test_refusal_names_the_invoking_command` |
 | SHARD-28 | The default command key is `ms_load` | `CommandScopeGateTest.test_default_command_key_is_ms_load` |
 
@@ -619,8 +629,11 @@ Decision #26. A script marked active carrying no live tick.
 
 Argument parsing and scope resolution run on every command, so their happy paths are exercised
 end to end through `LOAD` and `STALL`. What is covered here is the refusals — the only thing standing
-between an operator typo and a traceback — and the two commands whose `apply` body nothing else
+between an operator typo and a traceback — and the one command whose `apply` body nothing else
 reaches.
+
+Retired IDs, not reused: CMD-11 and CMD-14, the census output. `ms_spawn_report` is gutted and what
+it should become is open; SHARD-25 covers the refusal.
 
 | ID | Case | Test function |
 |---|---|---|
@@ -628,8 +641,6 @@ reaches.
 | CMD-05 | A positional token with no `=` raises `ValueError` | `ParseArgsTest.test_a_positional_without_an_equals_is_refused` |
 | CMD-06 | An empty key or value either side of `=` raises `ValueError` | `ParseArgsTest.test_an_empty_key_or_value_is_refused` |
 | CMD-10 | `ms_delete` removes the script row entirely | `OperateCommandBehaviourTest.test_ms_delete_removes_the_script_row` |
-| CMD-11 | `ms_spawn_report` lists current-vs-target living counts per rule | `OperateCommandBehaviourTest.test_ms_spawn_report_gives_current_against_target_per_rule` |
-| CMD-14 | `ms_spawn_report` says so for a script holding no rules, rather than reporting nothing | `OperateCommandBehaviourTest.test_ms_spawn_report_says_so_when_a_script_holds_no_rules` |
 
 ## CLI — `ms-validate`
 
@@ -663,8 +674,8 @@ Settled and reflected above:
 - **The two halves of the death formula stay disjoint.** `last_observed_counts` holds the headcount
   as observed in step 1; `spawned_last_tick` holds what the tick then added. Step 2 sums them. Folding
   the spawn into both makes the surplus read as a death (TICK-15, and TICK-12 pins the storage).
-- **A gate that cannot answer refuses rather than guessing.** Shard gates no-op entirely off a
-  sharded deployment (SHARD-01..02, SHARD-05..06, SHARD-19) and refuse without naming a shard they
+- **A gate that cannot answer refuses rather than guessing.** Instance gates no-op entirely off a
+  scaled deployment (SHARD-01, SHARD-05..06, SHARD-19) and refuse without naming an instance they
   cannot verify (SHARD-12).
 - **A failed operation is never reported as success.** The stalled state is named by every command
   that touches it, and a recovery that did not take is reported as such (STALL-05, STALL-15,
