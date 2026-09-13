@@ -2,6 +2,44 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-09-12 — the command gates move to `evennia-scaling`
+
+The optional integration is scaling, not shards. The question the gates answer is unchanged — is this
+the instance the rule set names — but the model underneath is: independent instances, each on its own
+Evennia database, rather than one database with a tenancy filter.
+
+**Detection reads two libraries.** `active_shard_id()` returns `MULTIPLEX_INSTANCE_ID` through
+`evennia_portal_multiplex.config.get_instance_id()`, behind an `evennia_scaling` presence check.
+Scaling mints no instance id of its own, so taking multiplex's is what keeps one fact in one place.
+The check is a bare import: scaling has no single-instance mode and refuses to boot without a valid
+`SCALING_ROLE`, so an import that succeeds means a multi-instance deployment. The `monolith` case is
+gone with it.
+
+**The router is refused by role.** `is_router_process()` reads `SCALING_ROLE`. Under shards the
+router's id was mandated to be the literal `"router"`, so an id comparison rejected it for free; under
+scaling `SCALING_ROUTER_ID` is an arbitrary name and a rule-set folder can be named after it. SHARD-32
+is that case: the router refused for a scope naming its own id.
+
+**Two mechanisms are gone, not replaced.** `preserve_tenant_context` carried a threading-local tenant
+across the `run_async` thread spawn, and there is no tenancy to carry. The Deployer's `owning_shard`
+stamp declared which shard should tick a script, and each instance now has its own `ScriptDB` — a
+script exists only where it was deployed. Confinement is structural.
+
+**`ms_spawn_report` raises `NotImplementedError`.** Its census counted through `ObjectDB` and was
+correct only on an unscoped process; no instance can see another's database, so there is nothing to
+run a whole-world count on. A per-instance report would be a correct answer to a question the operator
+did not ask. What it should become is open and carries a `[TBD]` in
+[interoperability.md](interoperability.md); the command's docstring records what the old census
+produced. `check_cluster_wide_scope`, `is_shard_process` and the `cluster_wide_only` flag went with
+it, and CMD-11 / CMD-14 are retired.
+
+Net −385/+249 across five source files. Suite: 293 tests, green. Linters: 0 errors; the five
+sanctioned warnings and nothing else.
+
+**Not verified against a running deployment.** The tests inject stand-in `evennia_scaling` and
+`evennia_portal_multiplex` modules into `sys.modules`, so the four real imports have never executed.
+A renamed symbol would be caught by the `try`, silently disable every gate, and fail no test.
+
 ## 2026-09-12 — the library comes up to the current standards
 
 A pass over everything `library-standards-linter` had to say, code first and documentation last.

@@ -175,10 +175,13 @@ all land there rather than in `server.log`. See [logging.md](logging.md).
 - **`rule_id` reuse across a rename.** Reusing an id for a different mob inherits the old one's
   cooldown and observation state. Nothing detects it, because it is indistinguishable from an edit.
 
-## Co-installed with `evennia-shards`
+## Co-installed with `evennia-scaling`
 
-Two rules the pairing imposes: the first declared level must be named `shard`, and its value is the
-`SHARD_ID` of the shard those rules run on. Five of the six commands are then confined to the shard
-they can act on, and `ms_spawn_report` is refused *on* a shard because only an unscoped process can
-answer for the whole world. Both are enforced rather than merely documented — see
+One rule the pairing imposes: the first declared level must be named `shard`, and its value is the
+instance id — the `MULTIPLEX_INSTANCE_ID` of the instance those rules run on. Five of the six commands
+are then confined to the instance they act on, and `ms_spawn_report` is unavailable, because no
+instance can count a world it cannot see. Both are enforced rather than merely documented — see
 [interoperability.md](interoperability.md).
+
+Nothing to configure. The library detects scaling by importing it, and skips every check when it is
+absent.

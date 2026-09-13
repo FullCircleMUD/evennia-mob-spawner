@@ -60,9 +60,13 @@ sets `LOG_DIR`. See [logging.md](logging.md).
 
 ## evennia-message-bus
 
-**No coupling.** Neither imports the other. Deployment is per-process and deliberately so: `ms_load`
-refuses to run anywhere but the shard that owns the rules, and the scripts it creates are confined to
-that shard. Nothing here needs to tell another instance anything.
+**No coupling.** Neither imports the other. Deployment is per-instance and deliberately so: `ms_load`
+refuses to run anywhere but the instance the rules name, and the scripts it creates live in that
+instance's database. Nothing here needs to tell another instance anything.
+
+The one thing that might is `ms_spawn_report`, whose whole-world census no single instance can answer.
+Collecting it over the bus is one of the candidates under [evennia-scaling](#evennia-scaling), and
+is not decided.
 
 ## evennia-mob-spawner
 
@@ -76,97 +80,92 @@ servers is invisible to it.
 
 ## evennia-scaling
 
-**No coupling.** Neither imports the other, and nothing in this library names scaling or reads
-anything it sets. Co-installed today, the commands behave exactly as they do standalone.
+**Optional integration.** Neither library imports the other at module scope. This library detects
+scaling behind a `try` import and, when it is absent, every check below is skipped and the commands
+behave exactly as they do standalone. No setting to flip either way.
 
-That is a statement about the code as it stands, not a clearance for the pairing. Every gate this
-library carries is written against `evennia-shards` — the `shard` level name, the shard-scoped
-refusals, the `owning_shard` stamp — and scaling is a different model: independent instances on
-separate databases rather than one database with a tenancy filter.
+Scaling runs each instance on its own Evennia database, and no instance can see another's. That is
+what the gates are for: a rule set belongs to one instance, and the commands that deploy or operate on
+it only reach the instance running them.
 
-`[TBD — needs discussion: converting this library from shards-compatible to scaling-compatible is a
-piece of work in its own right, not a section to fill in, and it has not been scheduled. What it has
-to settle: the gate rule (the shards form — deploy only where the rule set names the instance you are
-standing on — is expected to transfer with the instance id substituted), what becomes of the
-`owning_shard` stamp and script confinement once `ScriptDB` is no longer shared, and `ms_spawn_report`,
-whose whole-world census has no unscoped process to run on when each instance holds its own database.]`
+**Detection is the import.** Scaling has no single-instance mode and refuses to boot an instance whose
+`SCALING_ROLE` is neither `router` nor `shard`, so an import that succeeds on a running server means a
+multi-instance deployment. The instance id is multiplex's `MULTIPLEX_INSTANCE_ID`, read through
+`evennia_portal_multiplex.config.get_instance_id()` — scaling mints none of its own, and a second
+source for the same fact would only give the two somewhere to disagree.
 
-## evennia-shards
-
-> **`evennia-shards` is deprecated.** `evennia-scaling` is the standard, and shards is retired from
-> service once the rebuild runs on scaling. Everything below describes an integration that works
-> today; it is not a model to extend or to copy into new work. Converting this library to scaling is
-> the piece of work described under [evennia-scaling](#evennia-scaling) above.
-
-**Optional integration.** `commands.py` imports `preserve_tenant_context` behind a `try`, falling back
-to an identity function when shards is absent, so both co-installed and standalone deployments are
-supported. See [shards-compatibility.md](shards-compatibility.md) for the mechanism.
-
-**The first declared level must be named `shard`.** When co-installed with shards, the first entry in
-`definitions.yaml`'s `levels:` list must be `shard`, and its value is the `SHARD_ID` of the shard the
-rules under it are intended to run on. Level names are otherwise consumer-chosen, so this is the one
-naming rule the pairing imposes — it is what lets `ms_load` tell which shard a rule set belongs to.
+**The first declared level must be named `shard`.** When co-installed with scaling, the first entry in
+`definitions.yaml`'s `levels:` list must be `shard`, and its value is the instance id the rules under
+it are intended to run on. Level names are otherwise consumer-chosen, so this is the one naming rule
+the pairing imposes — it is what lets `ms_load` tell which instance a rule set belongs to. The word
+matches scaling's own vocabulary (`SCALING_SHARDS`, `SCALING_ROLE=shard`), so the manifest says what
+the settings say.
 
 The mandate is enforced, not merely documented: once `definitions.yaml` is parsed, `ms_load` refuses
 outright if `shard` is not the first declared level. Nothing else catches that — a consumer who
-co-installs shards but keeps their own level names has queries that validate cleanly against their own
+co-installs scaling but keeps their own level names has queries that validate cleanly against their own
 declarations.
 
-**Monolith counts as a non-sharded install.** The gate is *shards installed **and** role is not
-`monolith`* — not merely that the import succeeded. Under `monolith` there is no shard context and
-`get_shard_id()` returns `None`, so every check below is skipped and the library behaves exactly as it
-does standalone.
+### Commands are gated to the instance they can act on
 
-### Commands are gated to the process they can act on
-
-A command's effect usually stops at the process running it, either because it writes rows this process
-can see, or because it reaches for a script's live `ndb._task`, which exists only where the script
-runs. Five commands therefore carry the same scope gate: the whole-world scope is refused, the query
-must start with `shard=`, and it must name this shard.
+A command's effect stops at the instance running it, either because it writes rows only that instance
+holds, or because it reaches for a script's live `ndb._task`, which exists only where the script runs.
+Five commands therefore carry the same scope gate.
 
 | Command | Gate | Why |
 |---|---|---|
-| `ms_load` | shard-scoped | deploys into this process only |
+| `ms_load` | shard-scoped | deploys into this instance only |
 | `ms_stop` | shard-scoped | `pause()` reads the local `ndb._task` |
 | `ms_restart` | shard-scoped | `unpause()` / `start()` attach locally |
-| `ms_delete` | shard-scoped | stops only the local task, then removes the shared row |
+| `ms_delete` | shard-scoped | stops the local task, then removes the row |
 | `ms_status` | shard-scoped | reads the local `ndb._task` to tell a stalled script from a ticking one |
-| `ms_spawn_report` | cluster-wide only | counts under the auto-filter; correct only unscoped |
+| `ms_spawn_report` | refuses outright | no instance can answer a whole-world census — see below |
 
-The failure modes the gates prevent differ, and are worth naming because they are all quiet. `ms_stop`
-from a foreign process writes nothing at all and still reports success. `ms_delete` removes the shared
-row while the owning shard keeps ticking a script that no longer exists. A whole-world `ms_stop` halts
-one shard's share and reports a clean sweep of every shard's.
+The gate has four refusals:
 
-`ms_spawn_report` is gated the other way. Its census counts through `ObjectDB`, so on a shard the
-auto-filter narrows it — a shard reporting on another shard's script counts zero of a live population.
-The router runs unscoped and is the only process that can answer for the whole world, including rows
-left unstamped, so the command is refused only on a shard. The check collapses to that single case
-because the router, monolith and standalone all see everything already.
+- **the whole-world scope.** The YAML manifest holds every instance's rule sets, so `all` would deploy
+  another instance's rules into this one — or stop this instance's share while reporting a clean sweep
+  of every instance's.
+- **the router.** It holds no game world, so no rule set deploys there. Refused by role rather than by
+  an id that never matches: `SCALING_ROUTER_ID` is an arbitrary name, so a rule-set folder can be named
+  after it and would otherwise pass the id check.
+- **a query that doesn't start with `shard=`.**
+- **a query naming an instance this one isn't.**
+
+The failure modes are worth naming because they are all quiet. `ms_stop` from another instance writes
+nothing at all and still reports success. `ms_delete` removes a row the owning instance is still
+ticking a script against.
 
 `ms_status` is gated even though it changes nothing. Two of the three states it reports — paused and
-stopped — come from shared row fields and read the same anywhere. The third, *stalled* (architecture.md
+stopped — come from row fields and read the same anywhere. The third, *stalled* (architecture.md
 decision #26), is a script marked active with no `LoopingCall` attached, and that task is a live object
 in one process's memory rather than a column. Off-process the task is absent rather than gone, so an
-ungated `ms_status` would report every foreign script as stalled. Seeing a stall at a glance is worth
-more than answering for every shard from one place, so the gate applies and the command is run per
-shard.
+ungated `ms_status` would report every foreign script as stalled.
 
-### Scripts are confined to the shard that owns them
+### `ms_spawn_report` is not available
 
-`ScriptDB` is not tenant-scoped, so a `MobSpawnerScript` row is visible to every process and each
-attaches its own `LoopingCall`. Left alone, a rule set ticks on processes that do not own it — and on
-the unscoped router `create_object` inserts with `shard_id=NULL`, leaving mobs invisible to the shard
-whose rooms they occupy. This is what produced 41 unstamped mobs on a live deployment.
+It raises `NotImplementedError`. The census counted through `ObjectDB`, which under a shared database
+meant one unscoped process could answer for the whole world; with each instance holding its own
+database there is nothing left to run a whole-world count on.
 
-The Deployer stamps the shards library's `owning_shard` Attribute on every script it creates or
-upserts, and shards confines the ticks. The stamp is safe to infer because `ms_load` already refuses to
-run anywhere but the owning shard: whichever shard the deploy happens on *is* the owner. Nothing is
-stamped off a sharded deployment, and an unstamped script is unconfined — correct, because the only way
-to be unstamped is to have been created where sharding wasn't in play.
+A per-instance census is not the same command wearing a different hat. Run on one shard it is a
+complete, correct answer about that shard, and an operator who asked "is my world populated?" would
+read it as an answer about the world.
 
-The confinement mechanism, and why it survives any boot order, is documented in
-[shards' `script-confinement.md`](../../evennia-shards/docs/script-confinement.md).
+`[TBD — needs discussion: what ms_spawn_report should become. Candidates raised but not decided — a
+per-instance report that says so in its own output, an aggregate collected over evennia-message-bus,
+or neither. The command's docstring carries what the old census produced, for whoever picks it up.]`
+
+### Scripts are confined by the database they live in
+
+Each instance has its own `ScriptDB`, so a `MobSpawnerScript` exists only where it was deployed and
+ticks only there. Nothing declares ownership and nothing enforces it — confinement is structural.
+
+## evennia-shards
+
+**No coupling.** Neither imports the other, and nothing in this library names shards or reads anything
+it sets. This library integrates with `evennia-scaling` instead; the two answer the same problem
+differently and are not co-installed.
 
 ## evennia-survival
 

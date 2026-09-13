@@ -37,13 +37,13 @@ pip install -e .
 python runtests.py
 ```
 
-## Compatibility with `evennia-shards`
+## Compatibility with `evennia-scaling`
 
-> `evennia-shards` is deprecated — `evennia-scaling` is the standard, and shards is retired from service once the rebuild runs on scaling. What follows works today; it is not a model to build on.
+The library works with [`evennia-scaling`](https://github.com/FullCircleMUD/evennia-scaling) but **does not require it**. Scaling runs each Evennia instance on its own database, so a rule set belongs to one instance and the commands that act on it only reach the instance running them. Co-installed, the first declared level must be named `shard` and carries the instance id, and the five operating commands are confined to the instance they act on — the whole-world scope is refused, and so is the router, which holds no game world.
 
-The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [docs/shards-compatibility.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/shards-compatibility.md).
+`ms_spawn_report` raises `NotImplementedError`: its census counted across a shared database, and no single instance can answer for the whole world. What it should become is open.
 
-Co-installed, the pairing also requires `shard` as the first declared level and confines `ms_load` to the shard it is running as. See [docs/interoperability.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/interoperability.md).
+If scaling isn't installed, every check is skipped and the library behaves as a standalone single-instance game. No configuration either way; the integration is a try-import. See [docs/interoperability.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/interoperability.md).
 
 ## Learn more
 

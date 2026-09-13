@@ -112,7 +112,6 @@ evennia-mob-spawner/
 │   ├── progress.md
 │   ├── interoperability.md
 │   ├── logging.md
-│   ├── shards-compatibility.md
 │   └── archive/
 ├── src/
 │   └── evennia_mob_spawner/   # library code (src layout)
@@ -143,7 +142,7 @@ evennia-mob-spawner/
 
 - Python 3.10+ (pinned via `pyproject.toml`).
 - Evennia is a runtime dependency (`pip install evennia`).
-- **Tests use Django's test runner via `runtests.py`, not pytest.** No consumer gamedir required. Pattern mirrors `evennia-shards`.
+- **Tests use Django's test runner via `runtests.py`, not pytest.** No consumer gamedir required, and no sibling library installed — the `evennia-scaling` integration is exercised by injecting stand-in modules into `sys.modules`, so the real import path has never run in tests.
 - Structural compliance: `python .claude/skills/library-standards-linter/lint_library.py evennia-mob-spawner` from the umbrella root. It validates the test-plan coverage trail too.
 - YAML parsing: PyYAML (`yaml.safe_load`). Schema validation: hand-written predicates rather than a schema library — same approach as `evennia-world-builder`. The tiering and what each tier refuses is in [docs/architecture.md](docs/architecture.md) § Validation tiering and gating.
 - **Two venvs, both gitignored.** The split is load-bearing:
@@ -156,4 +155,4 @@ evennia-mob-spawner/
 When in doubt about a convention not covered here, look at how a sibling library does it:
 
 - **[../evennia-world-builder/](../evennia-world-builder/)** — declarative YAML world authoring; partly implemented. Closest architectural cousin: same YAML/Reader/Validator pattern applied to static content.
-- **[../evennia-shards/](../evennia-shards/)** — split-deployment / sharding library; working MVP. Reference for the test-runner pattern, src layout, pyproject.toml shape.
+- **[../evennia-scaling/](../evennia-scaling/)** — many Evennia instances, each on its own database. The optional integration this library's command gates are written against; see [docs/interoperability.md](docs/interoperability.md).
