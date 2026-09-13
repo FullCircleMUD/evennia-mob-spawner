@@ -9,7 +9,7 @@ For each rule-set YAML file in the validated ``LoadResult``:
 3. Drain any in-flight tick via ``script.stop_when_safe(60s)``; fall
    back to ``script.force_stop()`` on timeout (decision #13's race
    protocol). Only invoked when the script is currently running.
-4. Replace ``db.spawn_table`` with the new rule list.
+4. Replace ``spawn_table`` with the new rule list.
 5. Purge bookkeeping entries for ``rule_id``s that vanished from YAML.
 6. Restore bookkeeping for ``rule_id``s that survived the swap.
 7. Resume the ticker (only if it was running before the drain).
@@ -61,10 +61,10 @@ class Deployer:
         # Snapshot bookkeeping before swapping the rule table. Any rule
         # whose rule_id survives the swap gets its state restored; any
         # rule whose rule_id vanished from YAML gets its entries purged.
-        old_last_spawn_times = dict(script.db.last_spawn_times or {})
-        old_last_death_times = dict(script.db.last_death_times or {})
-        old_last_observed_counts = dict(script.db.last_observed_counts or {})
-        old_spawned_last_tick = dict(script.db.spawned_last_tick or {})
+        old_last_spawn_times = dict(script.last_spawn_times)
+        old_last_death_times = dict(script.last_death_times)
+        old_last_observed_counts = dict(script.last_observed_counts)
+        old_spawned_last_tick = dict(script.spawned_last_tick)
 
         new_rule_ids = {rule["rule_id"] for rule in rules}
         preserved = set(old_last_spawn_times) & new_rule_ids
@@ -91,22 +91,22 @@ class Deployer:
 
         try:
             # Swap the rule table.
-            script.db.spawn_table = list(rules)
+            script.spawn_table = list(rules)
 
             # Preserve surviving bookkeeping; purge removed.
-            script.db.last_spawn_times = {
+            script.last_spawn_times = {
                 rid: ts for rid, ts in old_last_spawn_times.items()
                 if rid in new_rule_ids
             }
-            script.db.last_death_times = {
+            script.last_death_times = {
                 rid: ts for rid, ts in old_last_death_times.items()
                 if rid in new_rule_ids
             }
-            script.db.last_observed_counts = {
+            script.last_observed_counts = {
                 rid: c for rid, c in old_last_observed_counts.items()
                 if rid in new_rule_ids
             }
-            script.db.spawned_last_tick = {
+            script.spawned_last_tick = {
                 rid: c for rid, c in old_spawned_last_tick.items()
                 if rid in new_rule_ids
             }

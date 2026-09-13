@@ -195,7 +195,7 @@ Race protection between `ms_load` and an in-flight tick. For each rule-set file 
 2. **Snapshot state** from the existing script's `db` (bookkeeping dicts).
 3. **Graceful stop** — `script.stop_when_safe(timeout=60s)`. The script's tick loop checks a stop flag at safe points (between rule iterations within a tick) and acknowledges once in a consistent stopped state.
 4. **Force stop on timeout** — if no ack within the timeout, `script.force_stop()`. Internal-only; not an operator command. State already snapshotted in step 2.
-5. **Swap** — replace `db.spawn_table` with the new rules. Purge bookkeeping entries for removed rules. Restore the snapshot for rules that still exist.
+5. **Swap** — replace `spawn_table` with the new rules. Purge bookkeeping entries for removed rules. Restore the snapshot for rules that still exist.
 6. **Resume** — `script.unpause()` if the script was running before the drain (the drain pauses it). A script that was already paused / stopped at deploy time is NOT resumed — the operator's explicit stop isn't second-guessed.
 
 `ms_load` runs async (`run_async` / `deferToThread`, matching `wb_build`) so the reactor stays responsive while workers wait for stop acks. Each script transitions independently.

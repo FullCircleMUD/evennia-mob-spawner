@@ -2,6 +2,61 @@
 
 Running log of milestones with links to evidence. Reverse chronological — newest first.
 
+## 2026-09-12 — the library comes up to the current standards
+
+A pass over everything `library-standards-linter` had to say, code first and documentation last.
+
+**The script's persistent state is declared, not initialised.** The five names — `spawn_table`,
+`last_spawn_times`, `last_death_times`, `last_observed_counts`, `spawned_last_tick` — are
+`AttributeProperty` descriptors on `MobSpawnerScript`, so the shape sits in one visible place and
+`at_script_creation` no longer initialises anything. Every library read and write goes through the
+property rather than `.db`, which also removed the `or {}` guarding at each read site. The defaults
+are passed as callables (`default=dict`, not `default={}`) because a literal default is one object
+shared by every script — `STATE-03` pins that.
+
+None of the five validates in `at_set()`, deliberately: the library is their sole writer. The
+declaration is what makes adding validation later a change at one line rather than a hunt through
+every write site.
+
+**`mob.db.desc` stays on `.db`, and now says why.** It writes to a *consumer's* object, and Evennia's
+`DefaultObject` declares no `AttributeProperty` for `desc` — `get_display_desc` reads `self.db.desc`.
+A straight assignment would set a plain Python attribute that dies with the object, so descriptions
+would silently stop persisting.
+
+**Every Evennia import now says why that module needs the engine.** All twelve turned out to be
+genuinely needed; none came out. The two in `validator.py` are function-local on purpose, so the
+module stays importable without an engine and `ms-validate` can run Tiers 1 and 2 with no Evennia at
+all — the comment says so, because that is exactly what a tidy-up would undo.
+
+**`docs/installing.md` exists.** Six numbered steps from `pip install` to `ms_load`, the four
+optional settings with their defaults and reasons, the fact that there are no required settings, and
+a "what is not checked for you" section covering the seven ways a consumer can get this wrong
+silently — starting with leaving the library out of `INSTALLED_APPS`.
+
+**`interoperability.md` covers all eighteen siblings.** The `evennia-archive` placeholder is
+answered, and `evennia-scaling` carries a `[TBD]` rather than a guess: the shard gates documented
+here are written against `evennia-shards`, and what replaces them under scaling has not been worked
+through.
+
+**Five linter warnings are now recorded as decisions** in `CLAUDE.md`, each commented at its site:
+`_BASE_SCRIPT` (three findings on one line), `mob.db.desc`, and the `ms_log` binding name. They are
+the whole of the linter's current output — a clean run means these five and nothing else. They are
+not to be "fixed".
+
+**A staleness sweep closed what the change had left behind.** The persistent state was still
+documented as `db.spawn_table` in the module docstring, the deployer's, a comment in `commands.py`,
+architecture.md's load protocol and `DEP-04` — all now naming the properties. `README.md` carried a
+hardcoded test count, which is the kind of number that is wrong by the next commit, so it states that
+the suite is green and points at this file instead. `CLAUDE.md`'s repository tree listed three of the
+thirteen modules and no `installing.md`.
+
+**`evennia-shards` is marked deprecated wherever a reader would otherwise take it as current** —
+`README.md`, `interoperability.md` and `shards-compatibility.md`. Converting this library to
+`evennia-scaling` is named as a piece of work in its own right, unscheduled, with `ms_spawn_report`
+as the open question inside it.
+
+Suite: 297 tests, green. Linters: 0 errors on all three.
+
 ## 2026-09-12 — the constants gather in config.py
 
 Eighteen module-level constants moved out of `commands.py`, `definitions.py`, `finder.py`,

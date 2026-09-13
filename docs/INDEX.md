@@ -7,6 +7,8 @@ Map of all documents in this directory, organised by category. Add new documents
 - **[progress.md](progress.md)** — running log of milestones with links to evidence.
 - **[test-plan.md](test-plan.md)** — every test case the library commits to covering, and the test function covering it. Any behavioural change starts here.
 
+- **[installing.md](installing.md)** — everything a consumer game does to get the library running: the numbered steps, the settings and their defaults, and what is not checked for you.
+
 ## Architecture and design
 
 - **[architecture.md](architecture.md)** — primary entry point for architectural questions. Library / consumer ownership boundary, pipeline shape, agreed decisions, open `[TBD]` items.

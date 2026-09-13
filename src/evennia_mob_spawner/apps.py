@@ -23,6 +23,9 @@ class EvenniaMobSpawnerConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self):
+        # The engine itself, because what this hook does is wrap Evennia's
+        # own ``_init``. There is no way to defer work until the lazy
+        # attribute exports exist without holding the module they hang off.
         import evennia
 
         if getattr(evennia, "_evennia_mob_spawner_init_wrapped", False):
@@ -48,6 +51,9 @@ def _install_commands():
     Idempotent — the patch flag prevents double-installation if
     multiple libraries (or repeated ``_init()`` calls) reach this code.
     """
+    # The cmdset the library patches itself into. Auto-installing the admin
+    # commands means reaching for the set they have to land in; a consumer
+    # would otherwise have to wire every command by hand.
     from evennia.commands.default.cmdset_account import AccountCmdSet
 
     if getattr(AccountCmdSet, "_evennia_mob_spawner_cmdset_patched", False):

@@ -36,7 +36,13 @@ and operates on every ``MobSpawnerScript`` instance in the DB (which
 catches orphan scripts whose source files were removed from the
 manifest — see architecture.md "Edge cases").
 """
+# Both unavoidable for a module whose job is in-game commands. An Evennia
+# command is one by inheritance — there is no duck-typed alternative the
+# cmdhandler will accept.
 from evennia.commands.command import Command as BaseCommand
+
+# The deploy pipeline fetches YAML over the network, and doing that on the
+# reactor thread would freeze every connected player for the duration.
 from evennia.utils.utils import run_async
 
 from evennia_yaml_reader import ReaderError
@@ -530,7 +536,7 @@ class CmdMsLoad(BaseCommand):
 
         # Deploy stage: race-safe upsert. The Deployer drains any
         # in-flight tick (decision #13's stop_when_safe + force_stop
-        # protocol), swaps db.spawn_table, and resumes the ticker —
+        # protocol), swaps spawn_table, and resumes the ticker —
         # all per-file, preserving cooldown/observation state for
         # rules that survive the swap.
         messages.append("ms_load: starting deployment")
@@ -1035,7 +1041,7 @@ class CmdMsStatus(_MsOperateBase):
 
     def apply(self, script, messages: list) -> None:
         state = "stalled" if _is_stalled(script) else _script_state(script)
-        rule_count = len(script.db.spawn_table or [])
+        rule_count = len(script.spawn_table)
         rule_suffix = "" if rule_count == 1 else "s"
         line = (
             f"  {script.db_key}: {_colour_state(state)}, "
@@ -1087,7 +1093,7 @@ class CmdMsSpawnReport(_MsOperateBase):
 
     def apply(self, script, messages: list) -> None:
         state = _script_state(script)
-        rules = script.db.spawn_table or []
+        rules = script.spawn_table
 
         if not rules:
             messages.append(f"  {script.db_key}: {state}, no rules")

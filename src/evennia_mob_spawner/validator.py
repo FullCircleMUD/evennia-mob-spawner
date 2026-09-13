@@ -762,6 +762,12 @@ def _diagnostic_area_tag_rooms_exist(loaded: LoadedRule) -> None:
     if not isinstance(value, str) or not value.strip():
         return
 
+    # Deliberately inside the function, not at module scope. This module
+    # stays importable without an engine so ``ms-validate`` can run Tiers
+    # 1 and 2 with no Evennia at all (decision #19); only the Tier 4
+    # diagnostics, which are engine-only by definition, reach for the ORM.
+    # The model rather than the typeclass: the query counts rooms by tag,
+    # and tags live on ObjectDB through Evennia's own m2m tables.
     from evennia.objects.models import ObjectDB
     from .config import get_area_tag_category
 
@@ -794,6 +800,12 @@ def _diagnostic_den_room_tag_rooms_exist(loaded: LoadedRule) -> None:
     if not isinstance(value, str) or not value.strip():
         return
 
+    # Deliberately inside the function, not at module scope. This module
+    # stays importable without an engine so ``ms-validate`` can run Tiers
+    # 1 and 2 with no Evennia at all (decision #19); only the Tier 4
+    # diagnostics, which are engine-only by definition, reach for the ORM.
+    # The model rather than the typeclass: the query counts rooms by tag,
+    # and tags live on ObjectDB through Evennia's own m2m tables.
     from evennia.objects.models import ObjectDB
     from .config import get_area_tag_category
 

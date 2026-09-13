@@ -2,8 +2,6 @@
 """Settings dispatch for evennia-mob-spawner."""
 import importlib
 
-from django.conf import settings
-
 
 DEFAULT_READER = "evennia_yaml_reader.github.GitHubReader"
 
@@ -24,6 +22,8 @@ def get_reader_class():
         ImportError: if the module path cannot be imported.
         AttributeError: if the named attribute does not exist on the module.
     """
+    from django.conf import settings
+
     dotted = getattr(settings, "MOB_SPAWNER_READER", DEFAULT_READER)
     module_path, _, attr_name = dotted.rpartition(".")
     module = importlib.import_module(module_path)
@@ -47,6 +47,8 @@ def get_tick_seconds() -> int:
     existing scripts keep their stored ``interval`` value until they
     are deleted and recreated.
     """
+    from django.conf import settings
+
     return getattr(settings, "MOB_SPAWNER_TICK_SECONDS", DEFAULT_TICK_SECONDS)
 
 
@@ -62,6 +64,8 @@ def get_area_tag_category() -> str:
     and by the Deployer's room-selection / re-tag machinery once it
     lands.
     """
+    from django.conf import settings
+
     return getattr(settings, "MOB_SPAWNER_AREA_TAG_CATEGORY", DEFAULT_AREA_TAG_CATEGORY)
 
 
@@ -78,6 +82,8 @@ def get_configured_reader():
         Whatever the resolved reader class's __init__ raises if kwargs
         don't match. Unset / empty kwargs setting is treated as ``{}``.
     """
+    from django.conf import settings
+
     reader_class = get_reader_class()
     kwargs = getattr(settings, "MOB_SPAWNER_READER_KWARGS", {}) or {}
     return reader_class(**kwargs)

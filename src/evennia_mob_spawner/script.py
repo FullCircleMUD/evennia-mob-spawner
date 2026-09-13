@@ -22,12 +22,16 @@ Inheritance:
     ``super().at_repeat()`` so the library's tick loop runs.
 
 Persistent state (architecture.md "The tick loop"):
-    - ``db.spawn_table``           — list of rule dicts (the YAML rules).
-    - ``db.last_spawn_times``      — ``{rule_id: timestamp_of_last_spawn}``.
-    - ``db.last_death_times``      — ``{rule_id: timestamp_of_last_observed_death}``.
-    - ``db.last_observed_counts``  — ``{rule_id: count_seen_at_last_tick}``, the
+    Declared as ``AttributeProperty`` on the class, so the library reads and
+    writes them by assignment — never through ``.db``, which would not reach
+    the descriptor.
+
+    - ``spawn_table``           — list of rule dicts (the YAML rules).
+    - ``last_spawn_times``      — ``{rule_id: timestamp_of_last_spawn}``.
+    - ``last_death_times``      — ``{rule_id: timestamp_of_last_observed_death}``.
+    - ``last_observed_counts``  — ``{rule_id: count_seen_at_last_tick}``, the
       headcount as taken in step 1, before that tick's own spawn.
-    - ``db.spawned_last_tick``     — ``{rule_id: count_spawned_in_prior_tick}``.
+    - ``spawned_last_tick``     — ``{rule_id: count_spawned_in_prior_tick}``.
 
 The tick loop:
     For each rule, on each tick:
@@ -54,7 +58,13 @@ import random
 import time
 
 from django.conf import settings
+
+# The script's persistent state is declared with AttributeProperty below, and
+# ``_persists_as_attribute`` inspects consumer typeclasses for it.
 from evennia.typeclasses.attributes import AttributeProperty
+
+# Resolves whatever dotted path BASE_SCRIPT_TYPECLASS names into the class this
+# script inherits from — see _BASE_SCRIPT below for why that happens here.
 from evennia.utils.utils import class_from_module
 
 from .config import (
@@ -115,6 +125,25 @@ class MobSpawnerScript(_BASE_SCRIPT):
     persistent state shape, and the tick-loop algorithm.
     """
 
+    # The persistent state, declared rather than initialised in
+    # at_script_creation, so the shape is visible in one place and adding
+    # validation later is a change at the declaration instead of a hunt
+    # through every write site.
+    #
+    # None of the five validates in at_set(), deliberately: the library is
+    # their sole writer. Four hold values its own tick loop computes, and
+    # spawn_table holds rules the Validator has already passed pre-flight.
+    # Validation goes in if a bad value is ever actually seen.
+    #
+    # The factories are passed as callables, not literals — a literal default
+    # is one object shared by every script, and an in-place write to one
+    # script's map would land in all of them (STATE-03).
+    spawn_table = AttributeProperty(default=list)
+    last_spawn_times = AttributeProperty(default=dict)
+    last_death_times = AttributeProperty(default=dict)
+    last_observed_counts = AttributeProperty(default=dict)
+    spawned_last_tick = AttributeProperty(default=dict)
+
     def at_script_creation(self):
         """Initialise persistent state on the script's first creation.
 
@@ -137,21 +166,17 @@ class MobSpawnerScript(_BASE_SCRIPT):
         self.persistent = True
         self.start_delay = True  # Don't fire at_repeat immediately on creation.
 
-        # Bookkeeping initialised empty. The Deployer populates
-        # ``spawn_table`` after creation; ``last_*`` dicts accumulate
-        # state across ticks.
-        self.db.spawn_table = []
-        self.db.last_spawn_times = {}
-        self.db.last_death_times = {}
-        self.db.last_observed_counts = {}
-        self.db.spawned_last_tick = {}
+        # The bookkeeping needs no initialisation here: the class declares
+        # each name with its own empty default, which Evennia creates on
+        # first access. The Deployer populates ``spawn_table`` after
+        # creation; the ``last_*`` maps accumulate state across ticks.
 
     # ------------------------------------------------------------------
     # Tick loop
     # ------------------------------------------------------------------
 
     def at_repeat(self):
-        """Tick — run one pass over every rule in ``db.spawn_table``.
+        """Tick — run one pass over every rule in ``spawn_table``.
 
         Algorithm per architecture.md "The tick loop". State is read
         from / written to the script's ``db`` namespace.
@@ -164,7 +189,7 @@ class MobSpawnerScript(_BASE_SCRIPT):
         """
         super().at_repeat()
 
-        spawn_table = self.db.spawn_table or []
+        spawn_table = self.spawn_table
         if not spawn_table:
             return
 
@@ -182,10 +207,10 @@ class MobSpawnerScript(_BASE_SCRIPT):
         self.ndb._tick_in_progress = True
         try:
             now = time.time()
-            prior_observed = dict(self.db.last_observed_counts or {})
-            prior_spawned = dict(self.db.spawned_last_tick or {})
-            last_spawn_times = dict(self.db.last_spawn_times or {})
-            last_death_times = dict(self.db.last_death_times or {})
+            prior_observed = dict(self.last_observed_counts)
+            prior_spawned = dict(self.spawned_last_tick)
+            last_spawn_times = dict(self.last_spawn_times)
+            last_death_times = dict(self.last_death_times)
 
             new_observed: dict[int, int] = {}
             new_spawned: dict[int, int] = {}
@@ -227,10 +252,10 @@ class MobSpawnerScript(_BASE_SCRIPT):
             # treated as "first tick" on next pass — that's harmless
             # under the death-detection formula since deaths come out
             # non-positive when the prior count is missing).
-            self.db.last_observed_counts = new_observed
-            self.db.spawned_last_tick = new_spawned
-            self.db.last_spawn_times = last_spawn_times
-            self.db.last_death_times = last_death_times
+            self.last_observed_counts = new_observed
+            self.spawned_last_tick = new_spawned
+            self.last_spawn_times = last_spawn_times
+            self.last_death_times = last_death_times
         finally:
             self.ndb._tick_in_progress = False
 
@@ -337,6 +362,9 @@ class MobSpawnerScript(_BASE_SCRIPT):
 
         Mobs with ``db_location is None`` (orphan, mid-delete) are excluded.
         """
+        # The model rather than the typeclass: the census counts rows by
+        # identity tag, and tags live on ObjectDB through Evennia's own
+        # many-to-many tables. Nothing here needs a typeclass instance.
         from evennia.objects.models import ObjectDB
 
         return ObjectDB.objects.filter(
@@ -380,6 +408,9 @@ class MobSpawnerScript(_BASE_SCRIPT):
         candidate room is full (``max_per_room``). Returns the first
         eligible room, or None if no room has space.
         """
+        # The model rather than the typeclass: the census counts rows by
+        # identity tag, and tags live on ObjectDB through Evennia's own
+        # many-to-many tables. Nothing here needs a typeclass instance.
         from evennia.objects.models import ObjectDB
 
         area_category = get_area_tag_category()
@@ -437,6 +468,9 @@ class MobSpawnerScript(_BASE_SCRIPT):
         tag conditions would look for one row satisfying both, which the
         many-to-many tag table cannot provide.
         """
+        # The model rather than the typeclass: the census counts rows by
+        # identity tag, and tags live on ObjectDB through Evennia's own
+        # many-to-many tables. Nothing here needs a typeclass instance.
         from evennia.objects.models import ObjectDB
 
         mob_count = ObjectDB.objects.filter(
@@ -471,6 +505,9 @@ class MobSpawnerScript(_BASE_SCRIPT):
           (decision #23) — exceptions inside the hook are caught and
           logged; the mob still exists.
         """
+        # Spawning is the one thing this library exists to do, and creating a
+        # typeclassed object is Evennia's to perform — it wires up the
+        # typeclass, the database row and the hooks in one call.
         from evennia.utils.create import create_object
 
         mob = create_object(
@@ -508,6 +545,18 @@ class MobSpawnerScript(_BASE_SCRIPT):
                 mob.tags.add(key, category=category)
 
             # Apply rule-level description override.
+            #
+            # Written through ``.db`` deliberately, and this is the one place
+            # the library does not use assignment. Evennia's DefaultObject
+            # declares no AttributeProperty for ``desc``: ``get_display_desc``
+            # reads ``self.db.desc``, and Evennia's own ``@desc`` command
+            # writes ``obj.db.desc``. So ``mob.desc = ...`` would set a plain
+            # Python attribute that dies with the object — the description
+            # would silently fail to persist and the mob would show the
+            # default instead, with the rule looking like it applied.
+            #
+            # The linter's ``db_attribute_write`` finding on this line is
+            # expected and is not to be "fixed".
             if "desc" in rule:
                 mob.db.desc = rule["desc"]
 
@@ -568,7 +617,7 @@ class MobSpawnerScript(_BASE_SCRIPT):
     def stop_when_safe(self, timeout: float = 60.0) -> bool:
         """Request a graceful stop. Wait up to ``timeout`` seconds for drain.
 
-        The ``Deployer`` calls this before swapping ``db.spawn_table``
+        The ``Deployer`` calls this before swapping ``spawn_table``
         so an in-flight tick doesn't see a half-mutated rule list. Sets
         ``ndb._stop_requested`` which the tick loop checks at the safe
         point between rules. Polls ``ndb._tick_in_progress`` until the

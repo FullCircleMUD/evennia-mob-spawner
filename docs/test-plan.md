@@ -25,6 +25,7 @@ All test functions live in `src/evennia_mob_spawner/tests.py`, run via `python r
 | `DIAG` | Tier 4 — deploy-time diagnostics |
 | `GATE` | `should_pre_validate` — the validation gating decision |
 | `SHARD` | Shard gates on the command surface |
+| `STATE` | `MobSpawnerScript`'s persistent state — how it is declared and stored |
 | `DEP` | `Deployer` — upsert, state preservation, purge |
 | `TICK` | The tick loop (`at_repeat` / `_tick_one_rule`) |
 | `PICK` | `_pick_room` — three-tier room selection |
@@ -388,6 +389,33 @@ The 2×2 of the `repo-ci-pre-validation` setting against `--force-validate`.
 | SHARD-27 | A refusal names the invoking command, not a hard-coded one | `CommandScopeGateTest.test_refusal_names_the_invoking_command` |
 | SHARD-28 | The default command key is `ms_load` | `CommandScopeGateTest.test_default_command_key_is_ms_load` |
 
+## STATE — `MobSpawnerScript`'s persistent state
+
+The five names the script persists — `spawn_table`, `last_spawn_times`, `last_death_times`,
+`last_observed_counts`, `spawned_last_tick` — are declared as `AttributeProperty` descriptors on the
+class rather than initialised in `at_script_creation` and written through `.db`. The declaration is
+what puts the state shape in one visible place, and it is what makes adding validation later a
+one-line change at the declaration instead of a hunt through every write site.
+
+**None of the five validates in `at_set()` today, deliberately.** The library is their sole writer:
+four hold values its own tick loop computes, and `spawn_table` holds rules the Validator has already
+passed pre-flight. Validation goes in if a bad value is ever actually seen, and the declaration is
+what makes that cheap.
+
+**The library writes them by assignment, never through `.db`.** `.db` goes through the
+`AttributeHandler` and never reaches the descriptor, so every `.db` write would become silently
+unvalidated the day an `at_set()` lands. The bypass cannot be closed from the library side — a
+consumer writing through `.db` gets whatever they set — so the rule is ours to keep rather than
+enforce.
+
+Where DEP and TICK cover what the state *means*, these cover how it is stored.
+
+| ID | Case | Test function |
+|---|---|---|
+| STATE-01 | A new script starts with the declared defaults — `spawn_table` empty list, the four maps empty dicts — with nothing initialising them in `at_script_creation` | `ScriptStateTest.test_state_01_new_script_starts_with_the_declared_defaults` |
+| STATE-02 | A value assigned through the property persists, read back from a freshly fetched script rather than the in-memory object | `ScriptStateTest.test_state_02_an_assigned_value_persists` |
+| STATE-03 | Two scripts do not share a default — writing one script's `last_spawn_times` leaves another's empty. Written in place, because that is what a shared mutable default leaks through; a wholesale assignment rebinds and would pass either way | `ScriptStateTest.test_state_03_two_scripts_do_not_share_a_default` |
+
 ## DEP — Deployer upsert
 
 | ID | Case | Test function |
@@ -395,7 +423,7 @@ The 2×2 of the `repo-ci-pre-validation` setting against `--force-validate`.
 | DEP-01 | Deploy creates a script when none exists | `DeployerTest.test_deploy_creates_new_script` |
 | DEP-02 | Separate files get separate scripts | `DeployerTest.test_deploy_separate_files_creates_separate_scripts` |
 | DEP-03 | Re-deploy reuses the existing script rather than duplicating it | `DeployerTest.test_redeploy_reuses_existing_script` |
-| DEP-04 | The swap replaces `db.spawn_table` | `DeployerTest.test_swap_replaces_spawn_table` |
+| DEP-04 | The swap replaces `spawn_table` | `DeployerTest.test_swap_replaces_spawn_table` |
 | DEP-05 | Bookkeeping survives for rules that survive the swap — reloading YAML must not reset a boss cooldown | `DeployerTest.test_state_preserved_for_surviving_rules` |
 | DEP-06 | Bookkeeping is purged for rules removed from YAML | `DeployerTest.test_state_purged_for_removed_rules` |
 | DEP-07 | A new rule starts with no bookkeeping | `DeployerTest.test_new_rule_starts_with_no_bookkeeping` |

@@ -1,5 +1,10 @@
 # Compatibility with `evennia-shards`
 
+> **`evennia-shards` is deprecated.** `evennia-scaling` is the standard, and shards is retired from
+> service once the rebuild runs on scaling. This document describes an integration that works today —
+> it is not a model to extend or to copy into new work. Converting this library to scaling is a piece
+> of work in its own right; see [interoperability.md](interoperability.md) § evennia-scaling.
+
 The library is **compatible with [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) but does not require it**. The integration is a single optional import in [`commands.py`](../src/evennia_mob_spawner/commands.py) and a one-line wrap around each `run_async` dispatch.
 
 This document covers the tenant-context wrap only. The full picture of the pairing — the `shard` level mandate, the scope checks `ms_load` enforces, and the unsolved script-confinement problem — is in [interoperability.md](interoperability.md).

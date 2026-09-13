@@ -1848,6 +1848,91 @@ class Tier4DiagnosticTest(TestCase):
         self.assertEqual(warnings, [])
 
 
+STATE_NAMES = (
+    "spawn_table",
+    "last_spawn_times",
+    "last_death_times",
+    "last_observed_counts",
+    "spawned_last_tick",
+)
+
+
+class ScriptStateTest(EvenniaWorldTestCase):
+    """How MobSpawnerScript's persistent state is declared and stored.
+
+    Where DeployerTest and the tick-loop tests cover what the state means,
+    these cover the storage underneath it: that the five names are
+    AttributeProperty descriptors on the class, that assigning through one
+    reaches the database, and that a default is not shared between scripts.
+    """
+
+    def _make_script(self, key):
+        from evennia.utils.create import create_script
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        return create_script(MobSpawnerScript, key=key)
+
+    def tearDown(self):
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        for script in MobSpawnerScript.objects.all():
+            script.delete()
+
+    def test_state_01_new_script_starts_with_the_declared_defaults(self):
+        """STATE-01"""
+        import inspect
+
+        from evennia.typeclasses.attributes import AttributeProperty
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        # getattr_static rather than getattr: reading a descriptor off the
+        # class triggers its __get__ with instance=None, which raises
+        # internally, so plain getattr would report "not declared".
+        for name in STATE_NAMES:
+            descriptor = inspect.getattr_static(MobSpawnerScript, name, None)
+            self.assertIsInstance(
+                descriptor,
+                AttributeProperty,
+                f"{name} is not declared as an AttributeProperty",
+            )
+
+        script = self._make_script("defaults.yaml")
+        self.assertEqual(script.spawn_table, [])
+        self.assertEqual(script.last_spawn_times, {})
+        self.assertEqual(script.last_death_times, {})
+        self.assertEqual(script.last_observed_counts, {})
+        self.assertEqual(script.spawned_last_tick, {})
+
+    def test_state_02_an_assigned_value_persists(self):
+        """STATE-02"""
+        from evennia_mob_spawner.script import MobSpawnerScript
+
+        script = self._make_script("persist.yaml")
+        script.last_spawn_times = {"boss": 1234.5}
+        script_id = script.id
+
+        # Drop the instance from Evennia's idmapper cache, so the value has
+        # to come back from the database rather than from the object we just
+        # wrote to. Without this the assertion passes on a plain Python
+        # attribute that would never have survived a restart.
+        script.flush_from_cache(force=True)
+        del script
+
+        fresh = MobSpawnerScript.objects.get(id=script_id)
+        self.assertEqual(fresh.last_spawn_times, {"boss": 1234.5})
+
+    def test_state_03_two_scripts_do_not_share_a_default(self):
+        """STATE-03"""
+        one = self._make_script("one.yaml")
+        two = self._make_script("two.yaml")
+
+        # In-place, because that is what a shared mutable default would leak
+        # through. A wholesale assignment rebinds and would pass either way.
+        one.last_spawn_times["boss"] = 1.0
+
+        self.assertEqual(two.last_spawn_times, {})
+
+
 class DeployerTest(EvenniaWorldTestCase):
     """End-to-end deployment: script lookup-or-create, swap, preserve, purge.
 

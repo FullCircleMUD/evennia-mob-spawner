@@ -5,10 +5,48 @@ constrained by, a sibling: it reads rule-set YAML through a pluggable reader, cr
 `MobSpawnerScript` per rule-set file**, dispatches its deploy pipeline **off the reactor thread**, and
 calls `create_object` on every tick to place mobs into rooms it locates **by tag**.
 
+## evennia-ai-memory
+
+**No coupling.** Neither imports the other. Memory and lore retrieval hang off NPCs that already
+exist; this library creates objects and counts them, and never reads or writes what an NPC
+remembers. The one thing worth knowing is a consequence of the tick rather than an interaction:
+a mob this library culls or respawns is a new object, so anything keyed to the old object's identity
+is keyed to something that no longer exists. Whether that matters is ai-memory's question to answer,
+not ours to prevent.
+
 ## evennia-archive
 
-`[TBD — needs section: evennia-archive was created 2026-08-23 and this entry has not been written.
-See libraries/evennia-archive/docs/interoperability.md for what that library expects.]`
+**No coupling.** Neither imports the other. A spawned mob is deliberately disposable — the tick loop
+culls and replaces them, and a rule's identity lives in YAML rather than in any object — so there is
+nothing here that has to survive a rebuild of the game database.
+
+The open question is whether anything a *character* holds can point at a spawned mob, which would
+make that reference archive's to dispose of. That constraint belongs to archive's data model, and is
+tracked in [its own interoperability entry](../../evennia-archive/docs/interoperability.md) rather
+than restated here.
+
+## evennia-calendar
+
+**No coupling.** Neither imports the other. Cooldowns here are real seconds from `time.time()`, not
+game-world dates, so a calendar that redefines what a day means does not move a respawn timer.
+Time-of-day spawn gating is deliberately out of scope — see `CLAUDE.md` § Out of scope.
+
+## evennia-database-cascade
+
+**No coupling.** This library owns no tables and declares no alias: its state lives on
+`MobSpawnerScript` as Evennia Attributes, in the game database, and its content lives in a YAML repo
+read through `evennia-yaml-reader`. There is nothing here for the cascade to resolve, so no
+`db_spec.py` and no dependency.
+
+## evennia-equipment
+
+**No coupling.** Neither imports the other. A rule's `attrs:` and `tags:` are applied generically to
+whatever typeclass the rule names, so a consumer spawning equipped mobs does it in their own
+`ms_at_post_spawn()` hook — the library neither knows nor needs to know that a wearslot exists.
+
+## evennia-llm-service
+
+**No coupling.** Neither imports the other. This library makes no LLM calls and holds no prompts.
 
 ## evennia-logging-extension
 
@@ -20,11 +58,45 @@ No constraint travels either way beyond the extension's own install rule: a libr
 consumer's settings module goes below `from evennia.settings_default import *`, because that is what
 sets `LOG_DIR`. See [logging.md](logging.md).
 
+## evennia-message-bus
+
+**No coupling.** Neither imports the other. Deployment is per-process and deliberately so: `ms_load`
+refuses to run anywhere but the shard that owns the rules, and the scripts it creates are confined to
+that shard. Nothing here needs to tell another instance anything.
+
 ## evennia-mob-spawner
 
 This library.
 
+## evennia-portal-multiplex
+
+**No coupling.** Neither imports the other. This library touches no session, no portal service and no
+connection — it creates objects on a timer inside one server, and a player being redirected between
+servers is invisible to it.
+
+## evennia-scaling
+
+**No coupling.** Neither imports the other, and nothing in this library names scaling or reads
+anything it sets. Co-installed today, the commands behave exactly as they do standalone.
+
+That is a statement about the code as it stands, not a clearance for the pairing. Every gate this
+library carries is written against `evennia-shards` — the `shard` level name, the shard-scoped
+refusals, the `owning_shard` stamp — and scaling is a different model: independent instances on
+separate databases rather than one database with a tenancy filter.
+
+`[TBD — needs discussion: converting this library from shards-compatible to scaling-compatible is a
+piece of work in its own right, not a section to fill in, and it has not been scheduled. What it has
+to settle: the gate rule (the shards form — deploy only where the rule set names the instance you are
+standing on — is expected to transfer with the instance id substituted), what becomes of the
+`owning_shard` stamp and script confinement once `ScriptDB` is no longer shared, and `ms_spawn_report`,
+whose whole-world census has no unscoped process to run on when each instance holds its own database.]`
+
 ## evennia-shards
+
+> **`evennia-shards` is deprecated.** `evennia-scaling` is the standard, and shards is retired from
+> service once the rebuild runs on scaling. Everything below describes an integration that works
+> today; it is not a model to extend or to copy into new work. Converting this library to scaling is
+> the piece of work described under [evennia-scaling](#evennia-scaling) above.
 
 **Optional integration.** `commands.py` imports `preserve_tenant_context` behind a `try`, falling back
 to an identity function when shards is absent, so both co-installed and standalone deployments are
@@ -96,6 +168,12 @@ to be unstamped is to have been created where sharding wasn't in play.
 The confinement mechanism, and why it survives any boot order, is documented in
 [shards' `script-confinement.md`](../../evennia-shards/docs/script-confinement.md).
 
+## evennia-survival
+
+**No coupling.** Neither imports the other. Hunger and thirst meters tick on characters; this library
+maintains mob populations. A consumer whose mobs carry survival meters gets them through the
+typeclass the rule names, with no involvement from either library's API.
+
 ## evennia-targeting
 
 **No coupling.** Neither library imports the other, and they share no data. Targeting resolves in-room
@@ -119,3 +197,25 @@ nothing. Deploy order matters: rooms before rules.
 `loader.py`, `LocalReader` in `cli.py`, `ReaderError` in `commands.py`. The reader is the only path by
 which this library touches YAML; it does no file I/O of its own, which is what lets the same pipeline
 run against a local checkout and a remote repo.
+
+## fcm-telemetry-spawn
+
+**No coupling in code.** Neither imports the other, and the two "spawn" systems are unrelated: this
+library maintains mob populations, and telemetry-spawn places NFTs and fungibles against economy
+saturation. Nothing measured there reaches a rule — a rule's `target` and cooldowns come from YAML an
+author wrote, and never from a rate calculation.
+
+**One content-level interface, in one direction.** A rule can stamp `tags:` and `attrs:` on the mobs
+it spawns, and a consumer uses that to declare what a given mob can hold. Telemetry-spawn reads those
+markings when it decides where to place loot. That is the whole of the contact between them.
+
+The library stays out of what the markings mean. It applies `tags:` and `attrs:` generically to
+whatever typeclass a rule names; loot slot semantics and the tag categories that carry them are FCM's,
+per `CLAUDE.md` principle 2. So the coupling runs through the game database and the consumer's
+vocabulary rather than through either library's API, and neither has to change when the other does.
+
+## fcm-xrpl
+
+**No coupling.** Neither imports the other. This library spawns mobs; it mints nothing, owns no
+wallet, and never touches the ledger. A mob carrying on-chain loot gets it from the consumer's
+typeclass or its `ms_at_post_spawn()` hook, which is where a library-agnostic game concept belongs.

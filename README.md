@@ -6,7 +6,7 @@ Spawn rules — what typeclass spawns where, how many, how often — are express
 
 ## Status
 
-**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. 296 tests green, live-verified on a two-process sharded deployment against a real consumer game. See [docs/progress.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/progress.md) for the running milestone log.
+**Working.** The full pipeline — Reader → Loader → Validator → Deployer — is implemented. One persistent script per rule-set file maintains populations across restarts and content rebuilds without losing cooldown state. Six admin commands (`ms_load`, `ms_status`, `ms_stop`, `ms_restart`, `ms_delete`, `ms_spawn_report`), each gated to the process that can correctly answer for it. The suite is green and the library is live-verified on a two-process deployment against a real consumer game. See [docs/progress.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/progress.md) for the running milestone log.
 
 ## Is this for me?
 
@@ -24,6 +24,8 @@ If your game's mob spawning is a few hand-coded scripts that rarely change, you 
 pip install evennia-mob-spawner
 ```
 
+Then follow **[docs/installing.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/installing.md)** — the numbered steps, the settings and their defaults, and what is not checked for you.
+
 Editable install for development against a checkout:
 
 ```
@@ -36,6 +38,8 @@ python runtests.py
 ```
 
 ## Compatibility with `evennia-shards`
+
+> `evennia-shards` is deprecated — `evennia-scaling` is the standard, and shards is retired from service once the rebuild runs on scaling. What follows works today; it is not a model to build on.
 
 The library is **shards-compatible but does not require shards**. If [`evennia-shards`](https://github.com/FullCircleMUD/evennia-shards) is installed alongside, the `ms_load` / `ms_validate` commands automatically carry the active multi-tenant context across their `run_async` worker-thread dispatch — the Script rows created in the worker get stamped with the running process's `shard_id` and become correctly scoped under the auto-filter. If shards isn't installed, the library falls back to an identity passthrough at import time and behaves identically to a non-sharded deployment. No configuration needed either way; the integration is a try-import in `commands.py` using shards' `preserve_tenant_context` helper. See [docs/shards-compatibility.md](https://github.com/FullCircleMUD/evennia-mob-spawner/blob/main/docs/shards-compatibility.md).
 

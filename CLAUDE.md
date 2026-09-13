@@ -30,6 +30,7 @@ For any non-trivial task, start by reading in this order:
 2. [docs/INDEX.md](docs/INDEX.md) — map of all design docs.
 3. [docs/architecture.md](docs/architecture.md) — high-level mapping of the spawn system's mechanisms and the library / consumer ownership boundary. Read this before adding to the library's surface area; it captures decisions already pinned and flags the open questions explicitly.
 4. [docs/test-plan.md](docs/test-plan.md) — every case the library covers and the test function covering it. **Any behavioural change starts here**, not in the code.
+5. [docs/installing.md](docs/installing.md) — what a consumer actually does, and what is not checked for them. Read it before changing anything a consumer configures.
 
 ## Load-bearing architectural principles
 
@@ -40,7 +41,11 @@ These are the principles every implementation decision must respect. Getting the
 3. **Typeclass-agnostic; minimal protocol.** The library spawns objects via `create_object(typeclass=<rule.typeclass>)` and stamps a pair of passive identity *tags* (`mob_spawner_rule`, `mob_spawner_file`) on the new object — the library queries them to count populations; the typeclass neither reads nor writes them. It does not declare a base class the consumer must inherit. Death is detected by observation (tick-time count delta), not by a callback — there is no `on_death` API and the typeclass is never asked to phone home. The one optional protocol surface is a duck-typed `ms_at_post_spawn(self)` method: if the typeclass defines it, the library invokes it after spawn; if not, nothing happens. Adding a new mob typeclass to the consumer game must not require changes to the library.
 4. **Pre-flight rule validation, no broken ticks.** All rule validation runs before the script starts ticking. If any rule is malformed (missing required field, unresolvable typeclass, invalid cooldown), the script refuses to come up against that rule-set and reports every finding. The operator gets either a clean script or a complete refusal — never half-loaded rules that tick partially and fail silently.
 5. **Preserve runtime state across rule reloads.** Hot reload of YAML rules updates the script's rule table *in place* and preserves all runtime history — `last_spawn_times`, cooldown clocks, in-flight populations. Reloading rules because a description changed must not reset boss cooldowns. This is the sharp distinction from `evennia-world-builder`'s "clean + rebuild" lifecycle: world-builder rebuilds objects; mob-spawner reloads configuration.
-6. **Synthetic content first.** Build the library against synthetic test fixtures the library owns (a fake `TestMob` typeclass, synthetic tagged rooms, synthetic YAML rules), exhaustively, before any consumer-game integration. Real consumer content surfaces edge cases synthetic fixtures didn't reach; when it does, pause integration, capture the case as a new synthetic fixture, fix against it, resume. Fixtures stay forever as regression coverage.
+6. **Test-first.** A case lands in [docs/test-plan.md](docs/test-plan.md), then the test, then the
+   code. The plan is where behaviour is agreed, and the **Test function** column is a coverage claim
+   checked both ways — a name that does not exist and a test no case claims are both errors. See
+   [test-first-process.md](../../design/test-first-process.md).
+7. **Synthetic content first.** Build the library against synthetic test fixtures the library owns (a fake `TestMob` typeclass, synthetic tagged rooms, synthetic YAML rules), exhaustively, before any consumer-game integration. Real consumer content surfaces edge cases synthetic fixtures didn't reach; when it does, pause integration, capture the case as a new synthetic fixture, fix against it, resume. Fixtures stay forever as regression coverage.
 
 ## Out of scope
 
@@ -58,6 +63,23 @@ Areas where scope questions are likely to need explicit decisions (TBD when they
 - **Editing design docs.** Update or add design documents whenever an architectural decision is made or refined. Capture the *why*, not just the *what*. Index new docs in [docs/INDEX.md](docs/INDEX.md).
 - **Don't put implementation detail in this file or README.** Link out to docs/ instead. Keep CLAUDE.md and README.md stable; let docs/ churn.
 - **License.** BSD 3-Clause. Source files carry an SPDX header on the first line (`# SPDX-License-Identifier: BSD-3-Clause`).
+
+## Sanctioned divergences — five linter findings that are decisions
+
+The `library-standards-linter` reports five warnings that are settled rather than outstanding. Each
+is commented at its site, and they are the whole of its current output — a clean run means these five
+and nothing else. **Do not "fix" them**; a session working down the linter output would otherwise
+undo all five.
+
+| Finding | Where | Why |
+|---|---|---|
+| `constant_outside_config`, `settings_read_outside_config`, `settings_import_at_module_scope` | `script.py` — `_BASE_SCRIPT` | It resolves `BASE_SCRIPT_TYPECLASS` into the class `MobSpawnerScript` inherits from, so it must evaluate when `script.py` is imported. Moving it to `config.py` was tried and raises `AppRegistryNotReady`: `config.py` is imported from `__init__.py`, which runs during `django.setup()` while the app registry is still populating. |
+| `db_attribute_write` | `script.py` — `mob.db.desc` | Evennia's `DefaultObject` declares no `AttributeProperty` for `desc`; `get_display_desc` reads `self.db.desc`. A straight assignment would set a plain Python attribute that dies with the object, so descriptions would silently stop persisting. |
+| `log_shim_function_name` | `log.py` — `ms_log` | The name is kept deliberately. `log.py` is internal and never re-exported, so every import is already qualified by the package; the linter's four-character stem floor is what objects, not the standard's "named for the library". |
+
+The one thing that is *not* a divergence: `evennia-yaml-reader` and `evennia-logging-extension` are
+hard dependencies and neither is on PyPI, so both install from a checkout. See
+[docs/installing.md](docs/installing.md).
 
 ## Documentation discipline (load-bearing)
 
@@ -84,6 +106,7 @@ evennia-mob-spawner/
 ├── .gitignore
 ├── docs/                      # technical wiki (humans + LLMs)
 │   ├── INDEX.md
+│   ├── installing.md          # what a consumer does, start to finish
 │   ├── architecture.md
 │   ├── test-plan.md
 │   ├── progress.md
@@ -93,7 +116,18 @@ evennia-mob-spawner/
 │   └── archive/
 ├── src/
 │   └── evennia_mob_spawner/   # library code (src layout)
-│       ├── __init__.py
+│       ├── __init__.py        # the public surface + __version__
+│       ├── config.py          # every constant, and the settings accessors
+│       ├── apps.py            # AppConfig.ready() — installs the commands
+│       ├── definitions.py     # definitions.yaml → declared levels
+│       ├── finder.py          # walks index.yaml to resolve a query
+│       ├── loader.py          # reads the matched rule-set files
+│       ├── validator.py       # the four predicate tiers
+│       ├── deployer.py        # upsert: drain, swap, preserve, resume
+│       ├── script.py          # MobSpawnerScript and the tick loop
+│       ├── commands.py        # the six ms_* admin commands
+│       ├── cli.py             # ms-validate, the engine-free CLI
+│       ├── errors.py          # the library's exception types
 │       ├── log.py             # binds ms_log to mob_spawner.log via evennia-logging-extension
 │       └── tests.py           # unit tests, run via runtests.py
 ├── tests/                     # standalone test infrastructure
