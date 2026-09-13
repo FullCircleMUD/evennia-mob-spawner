@@ -101,6 +101,8 @@ evennia-mob-spawner/
 │   ├── test_settings.py
 │   └── urls.py
 └── examples/                  # demo gamedirs for integration testing
+    ├── requirements.txt       # the demo venv: evennia, sqlean on macOS, the siblings editable
+    └── demo_game/             # the gamedir; venv/ beside it, both gitignored
 ```
 
 ## Tools and environment
@@ -111,8 +113,9 @@ evennia-mob-spawner/
 - Structural compliance: `python .claude/skills/library-standards-linter/lint_library.py evennia-mob-spawner` from the umbrella root. It validates the test-plan coverage trail too.
 - YAML parsing: PyYAML (`yaml.safe_load`). Schema validation: hand-written predicates rather than a schema library — same approach as `evennia-world-builder`. The tiering and what each tier refuses is in [docs/architecture.md](docs/architecture.md) § Validation tiering and gating.
 - **Two venvs, both gitignored.** The split is load-bearing:
-  - `evennia-mob-spawner/venv/` is the library test venv — `runtests.py` runs against this. Install: `evennia`, `evennia-yaml-reader` (editable), and `evennia-mob-spawner` itself (`pip install -e .`). **Do not install `evennia-world-builder` here.** The library is independent of world-builder by architecture (siblings, not stacked); keeping world-builder out of the test venv is what enforces that — any accidental `import evennia_world_builder` in library code fails fast in tests instead of passing silently.
-  - `evennia-mob-spawner/examples/venv/` is the demo gamedir venv. Install: the same three plus `evennia-world-builder` (editable). The demo gamedir wires both libraries into `INSTALLED_APPS` to exercise the seam between them in vivo; running `evennia start` from `examples/demo_game/` needs both.
+  - `evennia-mob-spawner/venv/` is the library test venv — `runtests.py` runs against this. Install: `evennia`, `evennia-yaml-reader` and `evennia-logging-extension` (both editable), and `evennia-mob-spawner` itself (`pip install -e .`). **Do not install `evennia-world-builder` here.** The library is independent of world-builder by architecture (siblings, not stacked); keeping world-builder out of the test venv is what enforces that — any accidental `import evennia_world_builder` in library code fails fast in tests instead of passing silently.
+  - `evennia-mob-spawner/examples/venv/` is the demo gamedir venv, built from [examples/requirements.txt](examples/requirements.txt): `./venv/bin/pip install -r requirements.txt` from `examples/`. It adds `evennia-world-builder` (editable) — the demo wires both content libraries into `INSTALLED_APPS` to exercise the seam between them in vivo — and `sqlean.py` on macOS.
+- **macOS: the demo gamedir needs `sqlean.py`, and it is load-bearing.** macOS's system SQLite initialises through libdispatch, which does not survive `fork()`, so a daemonized `evennia start` deadlocks on the child's first SQLite call — silently, with no error and no timeout. The `darwin` block at the top of `examples/demo_game/server/conf/settings.py` swaps in the bundled build, and it only works if `sqlean.py` is actually installed in the venv: the block is a `try`/`except ImportError` and goes quiet otherwise. A demo that hangs after "Portal starting server ..." with nothing in `server.log` after the reactor line is this.
 
 ## Sibling libraries to reference
 

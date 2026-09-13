@@ -22,6 +22,27 @@ contract that no longer exists.
 Suite: 294 tests, green. The extension is declared in `pyproject.toml` and editable-installed into
 `venv/`; it is not on PyPI.
 
+**Proven live in `examples/demo_game/`**, which is the half the suite cannot reach — with a reactor
+running the write is deferred to a thread, and only a real server exercises that path. All three
+forms landed in `mob_spawner.log`:
+
+```
+26-09-12 23:55:53 [-] [INFO] live smoke: info path
+26-09-12 23:55:57 [-] [WARN] live smoke: warn path
+26-09-12 23:56:01 [-] [ERROR] live smoke: trace path
+Traceback (most recent call last):
+  File "<string>", line 2, in <module>
+ZeroDivisionError: division by zero
+```
+
+Standing the demo up took a macOS fix that is now part of the gamedir: `sqlean.py` and the `darwin`
+block in its settings. Without it a daemonized `evennia start` deadlocks on the child's first SQLite
+call, silently — see `CLAUDE.md` § Tools and environment. The hang reproduces on the commit before
+this one and in a sibling library's demo, so it is the environment rather than anything here.
+
+The library logs nothing at boot, so there is no per-process boot line to count and no
+settings-window write to lose. Both become live if boot logging is ever added.
+
 Extending logging into the pre-reactor window is separate work, not done here.
 
 ## 2026-08-30 — the test plan, and the phantom deaths it found

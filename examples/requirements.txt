@@ -1,0 +1,29 @@
+# The demo gamedir's environment. Install into examples/venv/:
+#
+#     cd examples
+#     python -m venv venv
+#     ./venv/bin/pip install -r requirements.txt
+#
+# Separate from the library's own venv at the repo root — the demo runs a real
+# Evennia server, the library's suite does not. Note the two are deliberately
+# different: evennia-world-builder belongs here and must NOT be installed in
+# the library venv, where an accidental import should fail the suite.
+
+evennia
+
+# macOS only, and load-bearing there — see the darwin block at the top of
+# demo_game/server/conf/settings.py. Harmless everywhere else.
+sqlean.py; sys_platform == "darwin"
+
+# Siblings this library depends on, editable so an edit in src/ is live in the
+# demo without reinstalling. Neither is on PyPI.
+-e ../../evennia-logging-extension
+-e ../../evennia-yaml-reader
+
+# The demo wires both content libraries into INSTALLED_APPS to exercise the
+# seam between them in vivo. They are siblings, not stacked — neither imports
+# the other.
+-e ../../evennia-world-builder
+
+# The library under test.
+-e ..
