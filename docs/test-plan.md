@@ -63,6 +63,7 @@ loop, `_spawn_one`) run against a real test database — `runtests.py` calls `ev
 |---|---|---|
 | PKG-01 | `__version__` is present and matches the packaged version | `PackageSmokeTest.test_version_present` |
 | PKG-02 | `evennia-yaml-reader`'s primitives import in the library venv | `YamlReaderDependencyTest.test_can_import_reader_primitives` |
+| PKG-03 | `get_area_tag_category` is exported from the package root, so a consumer reading the area tags asks the same accessor the library does | `PackageSmokeTest.test_area_tag_category_accessor_exported` |
 
 ## LOG — `ms_log`
 

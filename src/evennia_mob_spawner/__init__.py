@@ -21,7 +21,7 @@ from evennia_yaml_reader import (
     ReaderResult,
 )
 
-from .config import get_configured_reader, get_reader_class
+from .config import get_area_tag_category, get_configured_reader, get_reader_class
 from .definitions import Definitions
 from .errors import DefinitionsError
 
@@ -42,6 +42,7 @@ __all__ = [
     # settings dispatch
     "get_reader_class",
     "get_configured_reader",
+    "get_area_tag_category",
     # definitions
     "Definitions",
     "DefinitionsError",

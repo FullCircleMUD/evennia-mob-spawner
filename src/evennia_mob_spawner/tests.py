@@ -114,6 +114,14 @@ class PackageSmokeTest(TestCase):
     def test_version_present(self):
         self.assertEqual(evennia_mob_spawner.__version__, "0.1.2")
 
+    def test_area_tag_category_accessor_exported(self):
+        from evennia_mob_spawner import config
+
+        self.assertIn("get_area_tag_category", evennia_mob_spawner.__all__)
+        self.assertIs(
+            evennia_mob_spawner.get_area_tag_category, config.get_area_tag_category
+        )
+
 
 MOB_SPAWNER_LOG = "mob_spawner.log"
 
