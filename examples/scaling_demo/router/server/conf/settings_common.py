@@ -82,8 +82,10 @@ from server.conf.settings import *  # noqa: F401, F403, E402
 #
 # `evennia_mob_spawner` has no ordering constraint against any of them: it
 # reads scaling behind a try-import at command time, not at ready().
+# `evennia_calendar` supplies the clock the spawner's tick runs on.
 INSTALLED_APPS = list(INSTALLED_APPS) + [  # noqa: F405
     "evennia_archive",
+    "evennia_calendar",
     "evennia_database_cascade",
     "evennia_message_bus",
     "evennia_mob_spawner",

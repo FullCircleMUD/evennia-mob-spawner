@@ -25,12 +25,31 @@ def at_server_init():
     pass
 
 
+def _even_minute(rule):
+    """The demo's one spawn condition: yes during even wall-clock minutes.
+
+    Alternates often enough to watch a conditional rule fill and then stall.
+    """
+    import time
+
+    return int(time.time() // 60) % 2 == 0
+
+
 def at_server_start():
     """
     This is called every time the server starts up, regardless of
     how it was shut down.
+
+    Every instance runs the same hooks. Conditions are registered before
+    the spawner starts, so a rule naming one validates and runs. The router
+    holds no rule rows, so its spawner ticks over an empty table.
     """
-    pass
+    from evennia_calendar.service import start_calendar_clock
+    from evennia_mob_spawner import register_condition, start_mob_spawner
+
+    register_condition("even_minute", _even_minute)
+    start_calendar_clock()
+    start_mob_spawner()
 
 
 def at_server_stop():

@@ -71,6 +71,7 @@ SERVERNAME = "mob_spawner_demo"
 # fires and auto-installs its admin commands into AccountCmdSet.
 ######################################################################
 INSTALLED_APPS = list(INSTALLED_APPS) + [  # noqa: F405
+    "evennia_calendar",
     "evennia_world_builder",
     "evennia_mob_spawner",
 ]
@@ -96,10 +97,8 @@ WORLDBUILDER_GITHUB_REF = os.environ.get(
 ######################################################################
 # mob-spawner content source — the rule-set fixture repo
 ######################################################################
-# Pre-wired now even though the library's settings dispatch hasn't
-# landed yet (architecture doc has it as [TBD]); these settings are
-# inert until ms_load is implemented and starts reading them. Same
-# pattern as the world-builder block above.
+# Read by ms_load through the reader kwargs below. Same pattern as the
+# world-builder block above.
 MOB_SPAWNER_GITHUB_PAT = os.environ.get("MOB_SPAWNER_GITHUB_PAT", "")
 MOB_SPAWNER_GITHUB_REPO = os.environ.get(
     "MOB_SPAWNER_GITHUB_REPO",

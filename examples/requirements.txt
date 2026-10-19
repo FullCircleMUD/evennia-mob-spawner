@@ -19,6 +19,7 @@ sqlean.py; sys_platform == "darwin"
 # demo without reinstalling. Neither is on PyPI.
 -e ../../evennia-logging-extension
 -e ../../evennia-yaml-reader
+-e ../../evennia-calendar
 
 # The demo wires both content libraries into INSTALLED_APPS to exercise the
 # seam between them in vivo. They are siblings, not stacked — neither imports

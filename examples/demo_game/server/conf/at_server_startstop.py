@@ -29,8 +29,15 @@ def at_server_start():
     """
     This is called every time the server starts up, regardless of
     how it was shut down.
+
+    Starts evennia-calendar's clock, then the mob spawner: the spawner loads
+    its rules from the database and registers its tick on that clock.
     """
-    pass
+    from evennia_calendar.service import start_calendar_clock
+    from evennia_mob_spawner import start_mob_spawner
+
+    start_calendar_clock()
+    start_mob_spawner()
 
 
 def at_server_stop():

@@ -1,7 +1,7 @@
 """shard1: a place a character is played, and where rule sets deploy.
 
-Owns its own Evennia database, so the MobSpawnerScript rows deployed here
-exist nowhere else and tick only here. Its rule sets are `rules/shard1/`.
+Owns its own Evennia database, so the rule rows deployed here exist nowhere
+else and spawn only here. Its rule sets are `rules/shard1/`.
 """
 
 import os

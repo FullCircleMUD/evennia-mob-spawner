@@ -28,6 +28,7 @@ sqlean.py; sys_platform == "darwin"
 
 # The mob-spawner chain. The logging extension above is shared with it.
 -e ../../../evennia-yaml-reader
+-e ../../../evennia-calendar
 
 # The library under test, editable from the checkout two levels up.
 -e ../..

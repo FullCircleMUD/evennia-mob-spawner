@@ -43,3 +43,40 @@ rules:
     respawn_seconds: 120
     attrs:
       hp: 200
+
+  # A pack: two rules sharing one `pack` key. A new member spawns in a room
+  # where a living member already is — the alpha or another pack wolf — and
+  # only falls back to any millholm room when there is none, or when every
+  # such room is full or has a player standing in it.
+  - rule_id: 4
+    typeclass: typeclasses.demo_mobs.Wolf
+    key: the pack alpha
+    desc: Larger than the others, and they keep close to it.
+    area_tag: millholm
+    pack: millholm_pack
+    target: 1
+    max_per_room: 1
+    respawn_seconds: 60
+
+  - rule_id: 5
+    typeclass: typeclasses.demo_mobs.Wolf
+    key: a pack wolf
+    desc: It never strays far from the others.
+    area_tag: millholm
+    pack: millholm_pack
+    target: 3
+    max_per_room: 4
+    respawn_seconds: 15
+
+  # Conditional: `even_minute` is registered in at_server_start and answers
+  # yes only during even wall-clock minutes, so this population grows for a
+  # minute and then holds for a minute.
+  - rule_id: 6
+    typeclass: typeclasses.demo_mobs.Rat
+    key: a moth
+    desc: It flutters about, but only some of the time.
+    area_tag: millholm
+    condition: even_minute
+    target: 4
+    max_per_room: 1
+    respawn_seconds: 5

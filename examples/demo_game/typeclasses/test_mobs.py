@@ -35,11 +35,16 @@ class Rabbit(DefaultObject):
 
 
 class Kobold(DefaultObject):
-    """Test kobold — pack member; spawns alongside the chieftain."""
+    """Test kobold — plain area spawning across the warren."""
+
+
+class Boar(DefaultObject):
+    """Test boar — the pack-spawning fixture. The tusker and the wild boars
+    share a pack key, so new boars spawn where the sounder already is."""
 
 
 class KoboldChieftain(DefaultObject):
-    """Test boss-style mob — single instance, den-room placement,
+    """Test boss-style mob — single instance, single-room placement,
     death-cooldown semantics. Per-spawn state reset via
     ``ms_at_post_spawn`` (architecture decision #23): the library
     invokes this method after the mob is fully constructed and
