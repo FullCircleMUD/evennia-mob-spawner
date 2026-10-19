@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml",
     "evennia-yaml-reader",
     "evennia-logging-extension",
+    "evennia-calendar",
 ]
 
 [project.optional-dependencies]

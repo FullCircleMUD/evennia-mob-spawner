@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Settings dispatch for evennia-mob-spawner."""
 import importlib
+from enum import Enum
 
 
 DEFAULT_READER = "evennia_yaml_reader.github.GitHubReader"
@@ -35,17 +36,15 @@ DEFAULT_TICK_SECONDS = 15
 
 
 def get_tick_seconds() -> int:
-    """Return the tick interval (seconds) for ``MobSpawnerScript`` instances.
+    """Return ``N``, the number of one-second tick slots.
 
-    Architecture decision #3: tick interval is a library-level setting,
-    single value for the whole consuming game. Override via
-    ``settings.MOB_SPAWNER_TICK_SECONDS``; default is 15 seconds —
-    matches FCM's existing convention.
+    Each rule runs once every ``N`` seconds, in the slot its primary key
+    falls in, so a large rule set spreads across the cycle. A larger ``N``
+    spreads the load further and refills empty areas more slowly.
 
-    The setting feeds ``script.interval`` at ``at_script_creation``
-    time. Changing the setting only affects newly created scripts;
-    existing scripts keep their stored ``interval`` value until they
-    are deleted and recreated.
+    Architecture decision #3: a library-level setting, single value for the
+    whole consuming game. Override via ``settings.MOB_SPAWNER_TICK_SECONDS``;
+    read on every tick, so a change takes effect without a reload.
     """
     from django.conf import settings
 
@@ -53,16 +52,15 @@ def get_tick_seconds() -> int:
 
 
 def get_area_tag_category() -> str:
-    """Return the tag category used for ``area_tag`` / ``den_room_tag`` queries.
+    """Return the tag category used for ``area_tag`` queries.
 
     Architecture decision #1: tag category is a library-level setting,
     not a per-rule field. Override via ``settings.MOB_SPAWNER_AREA_TAG_CATEGORY``
     if your game uses a different category name; default is ``"mob_area"``,
     matching FCM's existing convention.
 
-    Used by the Validator's Tier 4 diagnostic predicates (decision #24)
-    and by the Deployer's room-selection / re-tag machinery once it
-    lands.
+    Used by the Validator's Tier 4 diagnostic (decision #24) and by the
+    runtime's room selection and spawn-time tagging.
     """
     from django.conf import settings
 
@@ -154,6 +152,30 @@ _DEFINITIONS_PATH = "definitions.yaml"
 _INDEX_FILENAME = "index.yaml"
 _RULES_KEY = "rules"
 
+
+class RuleField(Enum):
+    """The fields a rule may carry. Each value is the YAML key.
+
+    The validator refuses any other key, and every piece of code that reads
+    a rule takes the field's name from here, so a field is named in exactly
+    one place. Adding a field means adding it here as well as to the
+    validator.
+    """
+
+    RULE_ID = "rule_id"
+    TYPECLASS = "typeclass"
+    KEY = "key"
+    AREA_TAG = "area_tag"
+    TARGET = "target"
+    MAX_PER_ROOM = "max_per_room"
+    RESPAWN_SECONDS = "respawn_seconds"
+    DEATH_COOLDOWN_SECONDS = "death_cooldown_seconds"
+    DESC = "desc"
+    ATTRS = "attrs"
+    PACK = "pack"
+    CONDITION = "condition"
+    TAGS = "tags"
+
 # An index entry is one of these two kinds. Read by both the Finder, which
 # walks the index to resolve a query, and the Loader, which reads it again to
 # decide whether to descend or parse.
@@ -166,12 +188,13 @@ _VALID_KINDS = (_KIND_FOLDER, _KIND_FILE)
 _ALL_TOKEN = "all"
 FORCE_VALIDATE_FLAG = "force-validate"
 
-_STATE_COLOURS = {
-    "active": "|g",   # ticking
-    "paused": "|y",   # not running, and someone meant it
-    "stopped": "|y",
-    "stalled": "|r",  # not running, and nobody meant it
-}
+# --- The runtime -----------------------------------------------------------
+
+# The ``ServerConfig`` key holding whether the spawner is enabled.
+_ENABLED_CONFIG_KEY = "mob_spawner_enabled"
+
+# The name the tick's signal is registered under with evennia-calendar.
+_TICK_SIGNAL_NAME = "mob_spawner_tick"
 
 # --- The typeclass protocol, and what the library stamps -------------------
 
@@ -184,6 +207,10 @@ _MS_AT_POST_SPAWN_ATTR = "ms_at_post_spawn"
 # produced it, and which rule-set file that rule lives in.
 _RULE_TAG_CATEGORY = "mob_spawner_rule"
 _FILE_TAG_CATEGORY = "mob_spawner_file"
+
+# Stamped on every mob a rule with ``pack`` spawns; the key is the pack key.
+# Under the reserved prefix, so an author cannot fake pack membership.
+_PACK_TAG_CATEGORY = "mob_spawner_pack"
 
 # Library-reserved tag categories that authors cannot stamp from YAML.
 # Anything under this prefix is owned by the library — the two identity

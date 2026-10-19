@@ -10,31 +10,16 @@ Conventions for any command shipping from mob-spawner:
   AccountCmdSet, so the command works both OOC and IC. The consumer
   game does not need to import or wire these manually.
 
-Currently shipped (architecture decision #7's full set):
+Shipped:
 
-- ``ms_load``    — exercises the full pipeline (Reader → Definitions →
-                   Finder → Loader → Validator → Deployer) and upserts the
-                   persistent ``MobSpawnerScript`` whose tick loop maintains
-                   the population (observe → cooldown → spawn).
-- ``ms_stop``    — pause the ticker on matching scripts; state preserved.
-- ``ms_restart`` — kick the ticker on matching scripts without re-reading
-                   YAML; state preserved (decision #18).
-- ``ms_delete`` — remove matching scripts entirely from the DB. No state
-                   preserved; full clean slate.
-- ``ms_status`` — read-only inspect of matching scripts.
-- ``ms_spawn_report`` — population census: per-rule current vs target,
-                   grouped by ``area_tag`` within each script. Separate
-                   from ``ms_status`` by design — ``ms_status`` answers
-                   "what is the spawner doing?" (script state, ticks,
-                   cooldowns); this command answers "what mobs exist?".
-
-All six share the same scope-query syntax (``all | <level>=<value>``)
-and the same async dispatch pattern; the operations differ only in
-what they do to the resolved scripts. Scope resolution walks the
-manifest via Finder; an empty query (``all``) bypasses the manifest
-and operates on every ``MobSpawnerScript`` instance in the DB (which
-catches orphan scripts whose source files were removed from the
-manifest — see architecture.md "Edge cases").
+- ``ms_load``   — runs the full pipeline (Reader → Definitions → Finder →
+                  Loader → Validator → Deployer), writes the rule rows, and
+                  swaps the in-memory table the tick reads.
+- ``ms_status`` — the spawner's state, then one row per rule with its live
+                  count against its target.
+- ``ms_start`` / ``ms_stop`` — turn the spawner on or off. The setting
+                  persists across restarts.
+- ``ms_delete`` — remove one rule's row by id. Its live mobs stay.
 """
 # Both unavoidable for a module whose job is in-game commands. An Evennia
 # command is one by inheritance — there is no duck-typed alternative the
@@ -50,10 +35,11 @@ from evennia_yaml_reader import ReaderError
 from .config import (
     FORCE_VALIDATE_FLAG,
     SHARD_LEVEL,
+    RuleField,
     _ALL_TOKEN,
-    _STATE_COLOURS,
     active_shard_id,
     get_configured_reader,
+    get_tick_seconds,
     is_router_process,
 )
 from .definitions import Definitions
@@ -90,11 +76,8 @@ def check_shard_scope(query: dict, command_key: str = "ms_load") -> str | None:
     - a query that doesn't name the shard level at all;
     - a query naming an instance this one isn't.
 
-    Applies to any command whose effect is confined to the instance running
-    it. Deploying is one such: ``ms_load`` only reaches this instance's
-    scripts. So is anything touching a script's live ``ndb._task``, which
-    exists only where the script runs — a broad scope there would stop or
-    remove one instance's share while reporting a clean sweep of all of them.
+    Deploying is confined to the instance running it: ``ms_load`` writes
+    only this instance's rule table.
     """
     shard_id = active_shard_id()
     if shard_id is None:
@@ -212,8 +195,8 @@ def _run_validator(
     Returns True on a clean pass, False if the validator refused.
     Callers should return early on False. The command runs inside
     Evennia, so Tier 3 predicates (typeclass importability,
-    ms_at_post_spawn callability + signature) and Tier 4 diagnostics
-    (tag-existence WARN logs) both fire.
+    ms_at_post_spawn callability + signature, registered conditions) and
+    Tier 4 diagnostics (tag-existence WARN logs) both fire.
     """
     validator = Validator(definitions, evennia_runtime=True)
     try:
@@ -314,15 +297,15 @@ class CmdMsLoad(BaseCommand):
             at_err=self._on_async_err,
         )
 
-    def _run_pipeline(self, query: dict, flags: set) -> list:
+    def _run_pipeline(self, query: dict, flags: set) -> tuple[list, bool]:
         """Worker-thread entrypoint: runs the full pipeline.
 
-        Collects every operator-facing line into a list of messages and
-        returns it. ``at_return`` flushes the list via ``caller.msg`` on
-        the reactor thread. Errors with operator-meaningful context
-        (validation refusal, deploy failure) get appended as messages
-        and the function returns normally; only unexpected exceptions
-        bubble out for ``at_err`` to handle.
+        Returns ``(messages, deployed)``. ``messages`` is every
+        operator-facing line; ``deployed`` is True only when rows were
+        written, and tells ``at_return`` whether to swap the in-memory
+        table. Errors with operator-meaningful context (validation refusal,
+        deploy failure) get appended as messages and the function returns
+        normally; only unexpected exceptions bubble out for ``at_err``.
         """
         messages: list = []
 
@@ -344,7 +327,7 @@ class CmdMsLoad(BaseCommand):
             )
             messages.append(msg)
             ms_log(msg, level="ERROR")
-            return messages
+            return messages, False
 
         try:
             definitions = Definitions.from_reader(reader)
@@ -352,12 +335,12 @@ class CmdMsLoad(BaseCommand):
             msg = f"ms_load: could not load definitions.yaml: {e}"
             messages.append(msg)
             ms_log(msg, level="ERROR")
-            return messages
+            return messages, False
         except DefinitionsError as e:
             msg = f"ms_load: definitions.yaml is malformed: {e}"
             messages.append(msg)
             ms_log(msg, level="ERROR")
-            return messages
+            return messages, False
 
         # The shard level can only be checked once definitions.yaml is
         # parsed. Ahead of validate_query so a consumer who never adopted
@@ -367,7 +350,7 @@ class CmdMsLoad(BaseCommand):
         if refusal:
             messages.append(refusal)
             ms_log(refusal, level="ERROR")
-            return messages
+            return messages, False
 
         try:
             definitions.validate_query(query)
@@ -375,27 +358,7 @@ class CmdMsLoad(BaseCommand):
             msg = f"ms_load: {e}"
             messages.append(msg)
             ms_log(msg, level="ERROR")
-            return messages
-
-        # Ahead of reading a single rule-set file: a stalled script in the
-        # scope makes the whole load moot, so a stall costs a manifest walk
-        # rather than a full load-and-validate of the repo.
-        try:
-            refusal = check_scope_not_stalled(query, reader, definitions)
-        except FinderQueryError as e:
-            msg = f"ms_load: {e}"
-            messages.append(msg)
-            ms_log(msg, level="ERROR")
-            return messages
-        except FinderManifestError as e:
-            msg = f"ms_load: manifest error: {e}"
-            messages.append(msg)
-            ms_log(msg, level="ERROR")
-            return messages
-        if refusal:
-            messages.append(refusal)
-            ms_log(" ".join(refusal.split()), level="WARN")
-            return messages
+            return messages, False
 
         finder = Finder(reader, definitions)
         loader = Loader(reader, definitions)
@@ -420,24 +383,24 @@ class CmdMsLoad(BaseCommand):
                 msg = f"ms_load: manifest error during pre-validation: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
             except (LoaderMissingIndexError, LoaderMissingEntryError,
                     LoaderInvalidShapeError) as e:
                 msg = f"ms_load: pre-validation load failed: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
             except ReaderError as e:
                 msg = f"ms_load: read error during pre-validation: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
 
             if not _run_validator(
                 messages, definitions, load_result,
                 "pre-validation failed",
             ):
-                return messages
+                return messages, False
 
             # Re-load with the requested scope (whole-repo pre-validate
             # succeeded; now load the subset to deploy).
@@ -447,7 +410,7 @@ class CmdMsLoad(BaseCommand):
                 msg = f"ms_load: scope find error after pre-validation: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
         else:
             try:
                 found = finder.find(query)
@@ -455,12 +418,12 @@ class CmdMsLoad(BaseCommand):
                 msg = f"ms_load: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
             except FinderManifestError as e:
                 msg = f"ms_load: manifest error: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
 
             try:
                 load_result = loader.load(found)
@@ -469,17 +432,17 @@ class CmdMsLoad(BaseCommand):
                 msg = f"ms_load: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
             except ReaderError as e:
                 msg = f"ms_load: read error during loading: {e}"
                 messages.append(msg)
                 ms_log(msg, level="ERROR")
-                return messages
+                return messages, False
 
             if not _run_validator(
                 messages, definitions, load_result, "validation failed",
             ):
-                return messages
+                return messages, False
 
         n_files = len(load_result.rule_sets)
         n_rules = sum(len(rules) for rules in load_result.rule_sets.values())
@@ -489,11 +452,8 @@ class CmdMsLoad(BaseCommand):
             f"{n_rules} rule{'' if n_rules == 1 else 's'})"
         )
 
-        # Deploy stage: race-safe upsert. The Deployer drains any
-        # in-flight tick (decision #13's stop_when_safe + force_stop
-        # protocol), swaps spawn_table, and resumes the ticker —
-        # all per-file, preserving cooldown/observation state for
-        # rules that survive the swap.
+        # Deploy stage: write the rows, preserving timers for rules that
+        # survive. The in-memory table is swapped on the reactor afterwards.
         messages.append("ms_load: starting deployment")
         ms_log(f"ms_load: validation complete ({n_files} files, {n_rules} rules)")
 
@@ -504,21 +464,30 @@ class CmdMsLoad(BaseCommand):
             msg = f"ms_load: deploy failed: {e}"
             messages.append(msg)
             ms_log(msg, level="ERROR")
-            return messages
+            return messages, False
 
         messages.append(
             f"ms_load: deployment complete "
-            f"({n_files} script{'' if n_files == 1 else 's'} upserted, "
-            f"{n_rules} rule{'' if n_rules == 1 else 's'} active)"
+            f"({n_files} file{'' if n_files == 1 else 's'}, "
+            f"{n_rules} rule{'' if n_rules == 1 else 's'} written)"
         )
         ms_log(
             f"ms_load: deploy complete "
-            f"({n_files} scripts upserted, {n_rules} rules total)"
+            f"({n_files} files, {n_rules} rules written)"
         )
-        return messages
+        return messages, True
 
-    def _on_async_return(self, messages: list) -> None:
-        """Reactor-thread callback: flush every message to the operator."""
+    def _on_async_return(self, result) -> None:
+        """Reactor-thread callback: swap the table if rows were written, then report.
+
+        The swap happens here rather than in the worker because the tick
+        runs on the reactor too, so the two can never overlap.
+        """
+        from .runtime import load_rules
+
+        messages, deployed = result
+        if deployed:
+            load_rules()
         for msg in messages or []:
             self.caller.msg(msg)
 
@@ -544,498 +513,153 @@ class CmdMsLoad(BaseCommand):
 
 
 # ---------------------------------------------------------------------------
-# Scope resolution for ms_stop / ms_restart / ms_delete / ms_status.
-#
-# Empty query → all MobSpawnerScript instances (catches orphans —
-# scripts whose source files were removed from the manifest).
-# Non-empty query → Finder walks the manifest; the scope resolves to
-# either an exact file path (kind=file) or a folder path (kind=folder).
-# Scripts are matched by ``db_key`` (which is the file path the
-# Deployer used when creating them).
+# The operating commands
 # ---------------------------------------------------------------------------
 
 
-def _script_state(script) -> str:
-    """Return ``"active"`` / ``"paused"`` / ``"stopped"`` for ``script``.
+def status_lines() -> list:
+    """Return ``ms_status``'s output: the spawner's state, then one row per rule.
 
-    Evennia's ``script.is_active`` is True for BOTH running and paused
-    scripts — it flips to False only on ``stop()`` (or never-started).
-    The actual paused state is tracked via ``db._paused_time`` (set by
-    ``pause()``, cleared by ``unpause()`` / ``_stop_task()``). Without
-    this discrimination, ``ms_status`` reports a paused script as
-    "active" and ``ms_restart`` sees it as "already running" and
-    doesn't unpause — the bug fixed alongside this helper.
+    The live count is the tick's own population count, so the two never
+    disagree about what a rule has spawned.
     """
-    if not script.is_active:
-        return "stopped"
-    if script.db._paused_time:
-        return "paused"
-    return "active"
+    from .runtime import count_living, is_enabled, rule_states
+
+    states = rule_states()
+    lines = [
+        f"spawner: {'enabled' if is_enabled() else 'disabled'}, "
+        f"N={get_tick_seconds()}, "
+        f"{len(states)} rule{'' if len(states) == 1 else 's'}",
+        "id  file  rule  key  area  live/max",
+    ]
+    for state in states:
+        rule = state.rule
+        lines.append(
+            f"{state.pk}  {state.file}  {rule[RuleField.RULE_ID.value]}  "
+            f"{rule[RuleField.KEY.value]}  {rule[RuleField.AREA_TAG.value]}  "
+            f"{count_living(state)}/{rule[RuleField.TARGET.value]}"
+        )
+    return lines
 
 
-def _is_stalled(script) -> bool:
-    """True if ``script`` is marked active but carries no live tick.
+def delete_rule(arg: str) -> str:
+    """Delete the rule whose row id is ``arg``; return the operator message.
 
-    A script reaches this state when its ``ndb._task`` is lost without the
-    pause marker being written — ``_pause_task`` only records ``_paused_time``
-    when a task exists, so a task that disappears any other way leaves
-    ``is_active`` True with nothing scheduled. ``_script_state`` reports that
-    as "active", and Evennia's own recovery path cannot escape it:
-    ``_unpause_task`` is gated on ``_paused_time``, so the boot walk, ``pause()``
-    and ``unpause()`` are all no-ops. Only ``start()`` attaches a fresh task.
-
-    Reads ``ndb._task``, which exists only in the process running the script,
-    so this is meaningful **only** on a ``shard_scoped`` command. Anywhere
-    else it reports every foreign script as stalled.
+    The rule's live mobs stay in the world; nothing replaces them when they
+    die. A rule still in its YAML comes back on that file's next
+    ``ms_load``.
     """
-    return (
-        bool(script.is_active)
-        and not script.db._paused_time
-        and not script.ndb._task
-    )
+    from .models import SpawnRule
+    from .runtime import load_rules
+
+    arg = (arg or "").strip()
+    if not arg.isdigit():
+        return f"ms_delete: {arg!r} is not a rule id — `ms_status` lists them."
+
+    row = SpawnRule.objects.filter(pk=int(arg)).first()
+    if row is None:
+        return f"ms_delete: no rule has id {arg} — `ms_status` lists them."
+
+    label = f"{row.file} rule {row.rule_id}"
+    row.delete()
+    load_rules()
+    ms_log(f"ms_delete: removed {label} (id {arg})")
+    return f"ms_delete: removed {label} (id {arg}). Its live mobs stay until they die."
 
 
-def _colour_state(state: str) -> str:
-    """Wrap a state word in an Evennia colour code.
+class CmdMsStatus(BaseCommand):
+    """Show the spawner's state and every rule's population.
 
-    Scanning a list of scripts for the one that is wrong is the job the
-    operator actually has, so the state carries the colour rather than the
-    whole line. Unknown states pass through uncoloured.
-    """
-    colour = _STATE_COLOURS.get(state)
-    return f"{colour}{state}|n" if colour else state
+    Usage:
+        ms_status
 
-
-def _resolve_scope_to_scripts(query: dict, reader, definitions):
-    """Return ``(scripts, scope_description)`` for an operator query.
-
-    ``scripts`` is a list of ``MobSpawnerScript`` instances matching
-    the scope. ``scope_description`` is a short string for log lines
-    and operator output (``"all"``, the file path, or
-    ``"under <folder>"``).
-
-    May raise ``FinderQueryError`` / ``FinderManifestError`` if the
-    manifest can't be walked — callers should catch and surface as
-    operator messages.
-    """
-    from .script import MobSpawnerScript
-
-    if not query:
-        return list(MobSpawnerScript.objects.all()), "all"
-
-    finder = Finder(reader, definitions)
-    found = finder.find(query)
-
-    if found.kind == "file":
-        scripts = list(MobSpawnerScript.objects.filter(db_key=found.path))
-        return scripts, found.path
-
-    # folder: match scripts whose db_key falls under the folder path.
-    # Root folder (path == "") shouldn't happen here — a non-empty
-    # query that resolves to root would be malformed — but if it does,
-    # match everything for safety.
-    if not found.path:
-        scripts = list(MobSpawnerScript.objects.all())
-        return scripts, "all"
-
-    prefix = f"{found.path}/"
-    scripts = list(MobSpawnerScript.objects.filter(db_key__startswith=prefix))
-    return scripts, f"under {found.path}"
-
-
-def check_scope_not_stalled(query: dict, reader, definitions) -> str | None:
-    """Return an operator-facing refusal if any script in scope is stalled.
-
-    ``ms_load``'s job is rule content; getting a dead ticker going again is
-    ``ms_restart``'s. Deploying onto a stalled script swaps its rules and
-    reports a clean deploy while the script stays dead — so an operator
-    reaching for ``ms_load`` to troubleshoot a stall is told which command
-    they actually want, rather than being handed a success message.
-
-    Refuses the whole scope rather than skipping the stalled files. A
-    partial deploy reported as complete is the failure this guards against,
-    one level down. Naming every stalled script means one ``ms_restart``
-    over the same scope clears them all before the load is re-run.
-
-    Reads ``ndb._task`` via :func:`_is_stalled`, which is only meaningful in
-    the process running the script — sound here because ``ms_load`` already
-    refuses to run anywhere but the shard owning the scope.
-
-    Raises:
-        FinderQueryError / FinderManifestError: if the manifest can't be
-            walked — callers surface these as operator messages.
-    """
-    scripts, _scope = _resolve_scope_to_scripts(query, reader, definitions)
-    stalled = sorted(s.db_key for s in scripts if _is_stalled(s))
-    if not stalled:
-        return None
-
-    scope_args = " ".join(f"{k}={v}" for k, v in query.items()) or _ALL_TOKEN
-    listing = "\n".join(f"  {key}" for key in stalled)
-    return (
-        f"ms_load: refusing — {len(stalled)} "
-        f"script{'' if len(stalled) == 1 else 's'} stalled "
-        f"(active but not ticking):\n{listing}\n"
-        f"Run `ms_restart {scope_args}` to get them ticking, "
-        f"then re-run ms_load to deploy."
-    )
-
-
-class _MsOperateBase(BaseCommand):
-    """Shared scaffold for stop / restart / delete / status commands.
-
-    Subclasses define ``key``, ``op_label`` (for log + messages),
-    ``op_help`` (the docstring shown in-game), and override
-    ``apply(script, messages)`` to do the per-script work.
+    One row per rule: id, file, rule_id, key, area and the live count
+    against the rule's target. The id is what ``ms_delete`` takes.
     """
 
+    key = "ms_status"
     locks = "cmd:superuser()"
     help_category = "Mob Spawner"
-    op_label = "op"
-
-    shard_scoped = False
-    """Set on subclasses whose effect stops at the instance running them.
-
-    Evennia keeps a script's ``LoopingCall`` in ``ndb._task``, which exists
-    only in the process running it, so an operation reaching for that task
-    can only act on this instance's share:
-
-    - ``pause()`` reads ``ndb._task`` and, finding none, writes nothing at
-      all — run from elsewhere it silently does nothing while reporting
-      success.
-    - ``delete()`` stops only the local task before removing the row.
-
-    So these carry the same scope gate as ``ms_load``: the whole-world
-    scope is refused, and the query must name this instance. Stopping "all"
-    from one instance would halt its own scripts while every other instance
-    kept ticking — a partial action reported as a complete one.
-    """
 
     def func(self):
-        args = (self.args or "").strip()
-        if not args:
-            self.caller.msg(
-                f"{self.key}: no scope specified. Use `{self.key} all` for "
-                f"every script, or a query like `{self.key} shard=shard0`."
-            )
-            return
-
-        try:
-            query, flags = _parse_args(args)
-        except ValueError as e:
-            self.caller.msg(f"{self.key}: {e}")
-            return
-
-        if self.shard_scoped:
-            refusal = check_shard_scope(query, self.key)
-            if refusal:
-                self.caller.msg(refusal)
-                return
-
-        # Reader is needed only when the query is non-empty (manifest
-        # walk). For `all`, we go straight to the DB.
-        self.caller.msg(f"{self.key} {args} : running async (gameplay continues)…")
+        # One population count per rule — off the reactor.
         run_async(
-            self._run, query, flags,
+            status_lines,
             at_return=self._on_async_return,
             at_err=self._on_async_err,
         )
 
-    def _run(self, query: dict, flags: set) -> list:
-        messages: list = []
-        ms_log(f"{self.key} started: scope={self._describe_scope(query)}")
-
-        try:
-            scripts, scope_desc = self._resolve(query)
-        except Exception as e:
-            msg = f"{self.key}: scope resolution failed: {e}"
-            messages.append(msg)
-            ms_log(msg, level="ERROR")
-            return messages
-
-        if not scripts:
-            messages.append(f"{self.key}: no matching scripts in scope {scope_desc!r}")
-            ms_log(f"{self.key}: scope {scope_desc!r} matched 0 scripts")
-            return messages
-
-        messages.append(
-            f"{self.key}: scope {scope_desc!r} matched "
-            f"{len(scripts)} script{'' if len(scripts) == 1 else 's'}"
-        )
-
-        for script in scripts:
-            try:
-                self.apply(script, messages)
-            except Exception as e:
-                msg = f"  {script.db_key}: {self.op_label} failed: {e}"
-                messages.append(msg)
-                ms_log(msg, level="ERROR")
-
-        return messages
-
-    def _resolve(self, query: dict):
-        """Resolve scope query to scripts. Override to skip Reader for ``all``."""
-        if not query:
-            from .script import MobSpawnerScript
-            return list(MobSpawnerScript.objects.all()), "all"
-
-        try:
-            reader = get_configured_reader()
-            definitions = Definitions.from_reader(reader)
-        except (ReaderError, DefinitionsError) as e:
-            raise RuntimeError(f"manifest unavailable: {e}") from e
-
-        return _resolve_scope_to_scripts(query, reader, definitions)
-
-    @staticmethod
-    def _describe_scope(query: dict) -> str:
-        if not query:
-            return "all"
-        return " ".join(f"{k}={v}" for k, v in query.items())
-
-    def apply(self, script, messages: list) -> None:
-        """Per-script operation. Override in subclasses."""
-        raise NotImplementedError
-
-    def _on_async_return(self, messages: list) -> None:
-        for msg in messages or []:
-            self.caller.msg(msg)
+    def _on_async_return(self, lines: list) -> None:
+        self.caller.msg("\n".join(lines))
 
     def _on_async_err(self, failure) -> None:
         ms_log(
-            f"{self.key}: unexpected error: {failure.getTraceback()}",
+            f"ms_status: unexpected error: {failure.getTraceback()}",
             level="ERROR",
         )
         self.caller.msg(
-            f"{self.key}: command crashed unexpectedly; "
-            f"see mob_spawner.log for the traceback."
+            "ms_status: command crashed unexpectedly; "
+            "see mob_spawner.log for the traceback."
         )
 
 
-class CmdMsStop(_MsOperateBase):
-    """Stop the ticker on matching scripts. State preserved.
+class CmdMsStart(BaseCommand):
+    """Turn the spawner on.
 
     Usage:
-        ms_stop all
-        ms_stop <level>=<value> [<level>=<value> ...]
+        ms_start
 
-    Resumable via ``ms_restart`` or ``ms_load``. The script and its
-    bookkeeping (cooldown clocks, observed counts) remain in the DB.
+    The setting persists across restarts.
+    """
+
+    key = "ms_start"
+    locks = "cmd:superuser()"
+    help_category = "Mob Spawner"
+
+    def func(self):
+        from .runtime import set_enabled
+
+        set_enabled(True)
+        ms_log("ms_start: spawner enabled")
+        self.caller.msg("ms_start: spawner enabled.")
+
+
+class CmdMsStop(BaseCommand):
+    """Turn the spawner off.
+
+    Usage:
+        ms_stop
+
+    Nothing spawns until ``ms_start``. Live mobs are untouched, and the
+    setting persists across restarts.
     """
 
     key = "ms_stop"
-    op_label = "stop"
+    locks = "cmd:superuser()"
+    help_category = "Mob Spawner"
 
-    # pause() acts on ndb._task, which exists only where the script runs.
-    shard_scoped = True
+    def func(self):
+        from .runtime import set_enabled
 
-    def apply(self, script, messages: list) -> None:
-        state = _script_state(script)
-        if state != "active":
-            messages.append(f"  {script.db_key}: already {state}")
-            return
-        if _is_stalled(script):
-            # pause() would be a no-op here (see _is_stalled) and reporting
-            # "stopped" off the back of it puts a false line in the log. Say
-            # what is actually true and point at the one command that escapes.
-            messages.append(
-                f"  {script.db_key}: not ticking — nothing to stop "
-                f"(run ms_restart to recover)"
-            )
-            ms_log(
-                f"ms_stop: {script.db_key} found stalled (active, no task)",
-                level="WARN",
-            )
-            return
-        script.pause()
-        messages.append(f"  {script.db_key}: stopped")
-        ms_log(f"ms_stop: {script.db_key} paused")
+        set_enabled(False)
+        ms_log("ms_stop: spawner disabled")
+        self.caller.msg("ms_stop: spawner disabled.")
 
 
-class CmdMsRestart(_MsOperateBase):
-    """Kick the ticker on matching scripts. YAML not re-read; state preserved.
+class CmdMsDelete(BaseCommand):
+    """Delete one rule by id.
 
     Usage:
-        ms_restart all
-        ms_restart <level>=<value> [<level>=<value> ...]
+        ms_delete <id>
 
-    Recovery action for stopped or stuck scripts (architecture
-    decision #18). Sits between ``ms_status`` (diagnose) and
-    ``ms_load`` (full rule refresh) on the escalation ladder.
-    """
-
-    key = "ms_restart"
-    op_label = "restart"
-
-    # unpause() and start() both attach ndb._task on the calling process.
-    shard_scoped = True
-
-    def apply(self, script, messages: list) -> None:
-        state = _script_state(script)
-        # Ahead of the "active" check, because a stalled script reads as
-        # active — and unpause() cannot reach it, having no pause marker
-        # to work from. start() attaches a task unconditionally, so it is
-        # the only route out (see _is_stalled).
-        if _is_stalled(script):
-            script.start()
-            messages.append(
-                f"  {script.db_key}: restarted "
-                f"(was stalled — active but not ticking)"
-            )
-            ms_log(
-                f"ms_restart: {script.db_key} restarted from stalled "
-                f"(active, no task)",
-                level="WARN",
-            )
-            self._confirm_ticking(script, messages)
-            return
-        if state == "active":
-            messages.append(f"  {script.db_key}: already active")
-            return
-        if state == "paused":
-            script.unpause()
-            messages.append(f"  {script.db_key}: restarted (was paused)")
-            ms_log(f"ms_restart: {script.db_key} unpaused")
-            self._confirm_ticking(script, messages)
-            return
-        # stopped — needs start(), not unpause(). Decision #18 says
-        # ms_restart kicks the ticker on an existing script regardless
-        # of how it got stopped.
-        script.start()
-        messages.append(f"  {script.db_key}: restarted (was stopped)")
-        ms_log(f"ms_restart: {script.db_key} started")
-        self._confirm_ticking(script, messages)
-
-    @staticmethod
-    def _confirm_ticking(script, messages: list) -> None:
-        """Report a restart that didn't take, rather than claiming success.
-
-        Every route into a stalled script is a silent no-op — that is what
-        makes the state expensive to diagnose. A recovery command that
-        reports success without one is the same trap one step further on,
-        so the claim is checked before it is made.
-        """
-        if script.ndb._task:
-            return
-        messages.append(
-            f"  {script.db_key}: ...but no tick attached — "
-            f"see mob_spawner.log"
-        )
-        ms_log(
-            f"ms_restart: {script.db_key} restarted but no task attached",
-            level="ERROR",
-        )
-
-
-class CmdMsDelete(_MsOperateBase):
-    """Delete matching scripts entirely from the DB. State lost.
-
-    Usage:
-        ms_delete all
-        ms_delete <level>=<value> [<level>=<value> ...]
-
-    Full clean slate. Cooldown clocks, observation history,
-    everything goes. Use when ``ms_stop`` is not enough (e.g. when
-    you need to reset a script's accumulated state, or when the
-    rule-set file has been removed from the manifest and the orphan
-    script must be cleaned up).
+    ``ms_status`` lists the ids. The rule's live mobs stay until they die.
+    To remove a rule for good, take it out of its YAML and ``ms_load`` the
+    file — a rule still in its YAML comes back on that file's next load.
     """
 
     key = "ms_delete"
-    op_label = "delete"
-
-    # delete() stops only the local task before removing the shared row.
-    shard_scoped = True
-
-    def apply(self, script, messages: list) -> None:
-        key = script.db_key
-        script.delete()
-        messages.append(f"  {key}: deleted")
-        ms_log(f"ms_delete: {key} removed")
-
-
-class CmdMsStatus(_MsOperateBase):
-    """Read-only inspect of matching scripts.
-
-    Usage:
-        ms_status all
-        ms_status <level>=<value> [<level>=<value> ...]
-
-    Reports one line per script: path, state, rule count, tick
-    interval, and a next-tick estimate for a script that is ticking.
-    """
-
-    key = "ms_status"
-    op_label = "inspect"
-
-    # Read-only, but still gated: telling a stalled script from a healthy
-    # one means reading ndb._task, which exists only in the process running
-    # the script. From anywhere else the task is absent rather than gone,
-    # and the command would report every foreign script as stalled. Seeing
-    # a stall at a glance is worth more than answering for every shard from
-    # one place — see architecture.md decision #26.
-    shard_scoped = True
-
-    def apply(self, script, messages: list) -> None:
-        state = "stalled" if _is_stalled(script) else _script_state(script)
-        rule_count = len(script.spawn_table)
-        rule_suffix = "" if rule_count == 1 else "s"
-        line = (
-            f"  {script.db_key}: {_colour_state(state)}, "
-            f"{rule_count} rule{rule_suffix}, interval={script.interval}s"
-        )
-        # ``next=`` only makes sense when the ticker is actively scheduled.
-        # Paused / stopped / stalled scripts have no next-tick time.
-        if state == "active":
-            try:
-                next_in = script.time_until_next_repeat()
-                if next_in is not None:
-                    line += f", next={int(next_in)}s"
-            except Exception:
-                pass
-        messages.append(line)
-
-
-class CmdMsSpawnReport(_MsOperateBase):
-    """Population census of mobs spawned by matching scripts. Not available.
-
-    Usage:
-        ms_spawn_report all
-        ms_spawn_report <level>=<value> [<level>=<value> ...]
-
-    **Gutted deliberately, and the question is open.** The census counted
-    through ``ObjectDB``, which under a shared database meant one unscoped
-    process could answer for the whole world. Under ``evennia-scaling``
-    every instance holds its own database and no process can see another,
-    so there is nothing left to run a whole-world count on.
-
-    A per-instance census is not the same command wearing a different hat:
-    run on one shard it is a complete, correct answer about that shard, and
-    an operator who asked "is my world populated?" would read it as an
-    answer about the world. Refusing is the honest state until the shape is
-    decided — whether that is a per-instance report that says so in its own
-    output, an aggregate collected over ``evennia-message-bus``, or neither.
-
-    What it did, for whoever picks it up: for each script in scope it walked
-    the rule table and emitted per-rule current-vs-target counts grouped by
-    ``area_tag``, with per-area subtotals and a per-script total, marking
-    under-target rules with a trailing ``*``. Counts were live, one
-    tag-indexed ``COUNT`` per rule via ``_count_living``. Script state was
-    shown as context but never filtered the listing — a paused script with
-    ``current=0`` is exactly what the report existed to surface. It answered
-    only "what mobs exist?"; "why is this rule under target?" is
-    ``ms_status``, and splitting the two kept each output focused.
-    """
-
-    key = "ms_spawn_report"
-    op_label = "report"
+    locks = "cmd:superuser()"
+    help_category = "Mob Spawner"
 
     def func(self):
-        # Raised before the base class dispatches to a worker thread. That
-        # dispatch has an error handler which turns any exception into
-        # "command crashed unexpectedly", so raising further in would hide
-        # this behind a message saying nothing about why.
-        raise NotImplementedError(
-            "ms_spawn_report has no whole-world database to count under "
-            "evennia-scaling. See the class docstring."
-        )
+        self.caller.msg(delete_rule(self.args))

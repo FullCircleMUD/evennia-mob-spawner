@@ -41,10 +41,12 @@ import importlib
 import inspect
 from dataclasses import dataclass
 
+from .conditions import get_condition
 from .config import (
     _MS_AT_POST_SPAWN_ATTR,
     _RESERVED_TAG_CATEGORY_PREFIX,
     _TAG_DICT_ALLOWED_KEYS,
+    RuleField,
 )
 from .definitions import Definitions
 from .errors import ValidatorError
@@ -108,6 +110,33 @@ def _check_rule_is_mapping(loaded: LoadedRule) -> str | None:
     )
 
 
+def _check_no_unknown_fields(loaded: LoadedRule) -> str | None:
+    """Every key in the rule is a ``RuleField`` value.
+
+    A misspelt field, or one the library does not have, would otherwise
+    deploy and be ignored — the rule behaving as though the line were not
+    there, with nothing to say why. Every unknown key is named at once.
+    """
+    rule = _rule_or_none(loaded)
+    if rule is None:
+        return None
+
+    unknown = []
+    for key in rule:
+        try:
+            RuleField(key)
+        except ValueError:
+            unknown.append(key)
+    if not unknown:
+        return None
+
+    known = ", ".join(field.value for field in RuleField)
+    return (
+        f"{loaded.path}: unknown field(s) {', '.join(repr(k) for k in unknown)} "
+        f"— a rule's fields are: {known}"
+    )
+
+
 def _check_rule_id_well_formed(loaded: LoadedRule) -> str | None:
     """Required: ``rule_id`` is a non-negative integer.
 
@@ -115,23 +144,24 @@ def _check_rule_id_well_formed(loaded: LoadedRule) -> str | None:
     keys on. Stable across YAML reordering; changing it is the explicit
     signal that this is a different rule (architecture.md decision #10).
     """
+    field = RuleField.RULE_ID.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    if "rule_id" not in rule:
-        return f"{loaded.path}: missing required field 'rule_id'"
+    if field not in rule:
+        return f"{loaded.path}: missing required field '{field}'"
 
-    value = rule["rule_id"]
+    value = rule[field]
     # bool is a subclass of int in Python — exclude explicitly so that
     # `rule_id: true` doesn't slip through.
     if not isinstance(value, int) or isinstance(value, bool):
         return (
-            f"{loaded.path}: 'rule_id' must be an integer, "
+            f"{loaded.path}: '{field}' must be an integer, "
             f"got {type(value).__name__}"
         )
     if value < 0:
-        return f"{loaded.path}: 'rule_id' must be non-negative, got {value}"
+        return f"{loaded.path}: '{field}' must be non-negative, got {value}"
     return None
 
 
@@ -142,21 +172,22 @@ def _check_typeclass_well_formed(loaded: LoadedRule) -> str | None:
     only enforces the structural shape. Matches world-builder's split
     between shape (always run) and resolvability (engine-only).
     """
+    field = RuleField.TYPECLASS.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    if "typeclass" not in rule:
-        return f"{loaded.path}: missing required field 'typeclass'"
+    if field not in rule:
+        return f"{loaded.path}: missing required field '{field}'"
 
-    value = rule["typeclass"]
+    value = rule[field]
     if not isinstance(value, str):
         return (
-            f"{loaded.path}: 'typeclass' must be a string, "
+            f"{loaded.path}: '{field}' must be a string, "
             f"got {type(value).__name__}"
         )
     if not value.strip():
-        return f"{loaded.path}: 'typeclass' must be a non-empty string"
+        return f"{loaded.path}: '{field}' must be a non-empty string"
     return None
 
 
@@ -172,21 +203,22 @@ def _check_key_well_formed(loaded: LoadedRule) -> str | None:
     ``area_tag`` without colliding. Uniqueness of ``key`` is not
     enforced.
     """
+    field = RuleField.KEY.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    if "key" not in rule:
-        return f"{loaded.path}: missing required field 'key'"
+    if field not in rule:
+        return f"{loaded.path}: missing required field '{field}'"
 
-    value = rule["key"]
+    value = rule[field]
     if not isinstance(value, str):
         return (
-            f"{loaded.path}: 'key' must be a string, "
+            f"{loaded.path}: '{field}' must be a string, "
             f"got {type(value).__name__}"
         )
     if not value.strip():
-        return f"{loaded.path}: 'key' must be a non-empty string"
+        return f"{loaded.path}: '{field}' must be a non-empty string"
     return None
 
 
@@ -197,21 +229,22 @@ def _check_area_tag_well_formed(loaded: LoadedRule) -> str | None:
     category (architecture.md decision #1). Empty-tag queries against
     Evennia's tag table return everything, so empty is refused.
     """
+    field = RuleField.AREA_TAG.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    if "area_tag" not in rule:
-        return f"{loaded.path}: missing required field 'area_tag'"
+    if field not in rule:
+        return f"{loaded.path}: missing required field '{field}'"
 
-    value = rule["area_tag"]
+    value = rule[field]
     if not isinstance(value, str):
         return (
-            f"{loaded.path}: 'area_tag' must be a string, "
+            f"{loaded.path}: '{field}' must be a string, "
             f"got {type(value).__name__}"
         )
     if not value.strip():
-        return f"{loaded.path}: 'area_tag' must be a non-empty string"
+        return f"{loaded.path}: '{field}' must be a non-empty string"
     return None
 
 
@@ -222,21 +255,22 @@ def _check_target_well_formed(loaded: LoadedRule) -> str | None:
     the rule (never spawn); refused so authors don't accidentally
     silence a rule by typo.
     """
+    field = RuleField.TARGET.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    if "target" not in rule:
-        return f"{loaded.path}: missing required field 'target'"
+    if field not in rule:
+        return f"{loaded.path}: missing required field '{field}'"
 
-    value = rule["target"]
+    value = rule[field]
     if not isinstance(value, int) or isinstance(value, bool):
         return (
-            f"{loaded.path}: 'target' must be an integer, "
+            f"{loaded.path}: '{field}' must be an integer, "
             f"got {type(value).__name__}"
         )
     if value < 1:
-        return f"{loaded.path}: 'target' must be at least 1, got {value}"
+        return f"{loaded.path}: '{field}' must be at least 1, got {value}"
     return None
 
 
@@ -249,18 +283,19 @@ def _check_respawn_seconds_well_formed(loaded: LoadedRule) -> str | None:
     ``respawn_seconds`` xor ``death_cooldown_seconds`` rule is the
     exclusivity check's concern — separate predicate in a later pass.
     """
+    field = RuleField.RESPAWN_SECONDS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "respawn_seconds" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["respawn_seconds"]
+    value = rule[field]
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return (
-            f"{loaded.path}: 'respawn_seconds' must be a number, "
+            f"{loaded.path}: '{field}' must be a number, "
             f"got {type(value).__name__}"
         )
     if value < 0:
-        return f"{loaded.path}: 'respawn_seconds' must be non-negative, got {value}"
+        return f"{loaded.path}: '{field}' must be non-negative, got {value}"
     return None
 
 
@@ -271,21 +306,19 @@ def _check_death_cooldown_seconds_well_formed(loaded: LoadedRule) -> str | None:
     death detection). 0 is allowed for "no cooldown" semantics.
     Exclusivity with ``respawn_seconds`` is a separate predicate.
     """
+    field = RuleField.DEATH_COOLDOWN_SECONDS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "death_cooldown_seconds" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["death_cooldown_seconds"]
+    value = rule[field]
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return (
-            f"{loaded.path}: 'death_cooldown_seconds' must be a number, "
+            f"{loaded.path}: '{field}' must be a number, "
             f"got {type(value).__name__}"
         )
     if value < 0:
-        return (
-            f"{loaded.path}: 'death_cooldown_seconds' must be non-negative, "
-            f"got {value}"
-        )
+        return f"{loaded.path}: '{field}' must be non-negative, got {value}"
     return None
 
 
@@ -305,22 +338,24 @@ def _check_cooldown_exclusivity(loaded: LoadedRule) -> str | None:
     ``respawn_seconds: null`` is "present" for exclusivity purposes;
     bad values are the per-field shape predicate's concern.
     """
+    respawn = RuleField.RESPAWN_SECONDS.value
+    death = RuleField.DEATH_COOLDOWN_SECONDS.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    has_respawn = "respawn_seconds" in rule
-    has_death = "death_cooldown_seconds" in rule
+    has_respawn = respawn in rule
+    has_death = death in rule
 
     if has_respawn and has_death:
         return (
-            f"{loaded.path}: 'respawn_seconds' and 'death_cooldown_seconds' "
+            f"{loaded.path}: '{respawn}' and '{death}' "
             f"are mutually exclusive — declare exactly one"
         )
     if not has_respawn and not has_death:
         return (
             f"{loaded.path}: must declare exactly one of "
-            f"'respawn_seconds' or 'death_cooldown_seconds'"
+            f"'{respawn}' or '{death}'"
         )
     return None
 
@@ -336,23 +371,22 @@ def _check_max_per_room_well_formed(loaded: LoadedRule) -> str | None:
     either "unlimited per room" (no atmospheric ceiling) or "0 per
     room" (silenced rule), neither a good default.
     """
+    field = RuleField.MAX_PER_ROOM.value
     rule = _rule_or_none(loaded)
     if rule is None:
         return None
 
-    if "max_per_room" not in rule:
-        return f"{loaded.path}: missing required field 'max_per_room'"
+    if field not in rule:
+        return f"{loaded.path}: missing required field '{field}'"
 
-    value = rule["max_per_room"]
+    value = rule[field]
     if not isinstance(value, int) or isinstance(value, bool):
         return (
-            f"{loaded.path}: 'max_per_room' must be an integer, "
+            f"{loaded.path}: '{field}' must be an integer, "
             f"got {type(value).__name__}"
         )
     if value < 1:
-        return (
-            f"{loaded.path}: 'max_per_room' must be at least 1, got {value}"
-        )
+        return f"{loaded.path}: '{field}' must be at least 1, got {value}"
     return None
 
 
@@ -363,14 +397,15 @@ def _check_desc_well_formed(loaded: LoadedRule) -> str | None:
     absent. Empty string IS allowed — `desc: ""` is the explicit
     "override to empty" semantic (architecture.md Rule schema).
     """
+    field = RuleField.DESC.value
     rule = _rule_or_none(loaded)
-    if rule is None or "desc" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["desc"]
+    value = rule[field]
     if not isinstance(value, str):
         return (
-            f"{loaded.path}: 'desc' must be a string, "
+            f"{loaded.path}: '{field}' must be a string, "
             f"got {type(value).__name__}"
         )
     return None
@@ -383,61 +418,51 @@ def _check_attrs_well_formed(loaded: LoadedRule) -> str | None:
     library applies them generically; semantics belong to the
     consumer's typeclass.
     """
+    field = RuleField.ATTRS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "attrs" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["attrs"]
+    value = rule[field]
     if not isinstance(value, dict):
         return (
-            f"{loaded.path}: 'attrs' must be a mapping, "
+            f"{loaded.path}: '{field}' must be a mapping, "
             f"got {type(value).__name__}"
         )
     return None
 
 
-def _check_spawn_with_typeclass_well_formed(loaded: LoadedRule) -> str | None:
-    """Optional shape: ``spawn_with_typeclass`` is a non-empty string.
-
-    Pack-spawn trigger — room must already contain a living instance
-    of this typeclass. Importability is Tier 3.
-    """
+def _check_optional_name(loaded: LoadedRule, field: str) -> str | None:
+    """Shared shape for an optional field holding a name: a non-empty string."""
     rule = _rule_or_none(loaded)
-    if rule is None or "spawn_with_typeclass" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["spawn_with_typeclass"]
+    value = rule[field]
     if not isinstance(value, str):
         return (
-            f"{loaded.path}: 'spawn_with_typeclass' must be a string, "
+            f"{loaded.path}: '{field}' must be a string, "
             f"got {type(value).__name__}"
         )
     if not value.strip():
-        return (
-            f"{loaded.path}: 'spawn_with_typeclass' must be a non-empty string"
-        )
+        return f"{loaded.path}: '{field}' must be a non-empty string"
     return None
 
 
-def _check_den_room_tag_well_formed(loaded: LoadedRule) -> str | None:
-    """Optional shape: ``den_room_tag`` is a non-empty string.
+def _check_pack_well_formed(loaded: LoadedRule) -> str | None:
+    """Optional shape: ``pack`` is a non-empty string.
 
-    Single-room lair target. Uses the same tag category as ``area_tag``
-    (architecture.md decision #16).
+    The pack key. Every rule sharing it spawns into one pack.
     """
-    rule = _rule_or_none(loaded)
-    if rule is None or "den_room_tag" not in rule:
-        return None
+    return _check_optional_name(loaded, RuleField.PACK.value)
 
-    value = rule["den_room_tag"]
-    if not isinstance(value, str):
-        return (
-            f"{loaded.path}: 'den_room_tag' must be a string, "
-            f"got {type(value).__name__}"
-        )
-    if not value.strip():
-        return f"{loaded.path}: 'den_room_tag' must be a non-empty string"
-    return None
+
+def _check_condition_well_formed(loaded: LoadedRule) -> str | None:
+    """Optional shape: ``condition`` is a non-empty string.
+
+    The name of a registered condition. Whether it is registered is Tier 3.
+    """
+    return _check_optional_name(loaded, RuleField.CONDITION.value)
 
 
 def _normalise_tag(entry):
@@ -462,19 +487,20 @@ def _check_tags_field_shape(loaded: LoadedRule) -> str | None:
 
     Empty list is permitted (no-op). Field absent is permitted.
     """
+    field = RuleField.TAGS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "tags" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["tags"]
+    value = rule[field]
     if not isinstance(value, list):
         return (
-            f"{loaded.path}: 'tags' must be a list, "
+            f"{loaded.path}: '{field}' must be a list, "
             f"got {type(value).__name__}"
         )
 
     for i, entry in enumerate(value):
-        prefix = f"{loaded.path}: 'tags[{i}]'"
+        prefix = f"{loaded.path}: '{field}[{i}]'"
         if isinstance(entry, str):
             if not entry.strip():
                 return f"{prefix} must be a non-empty string"
@@ -529,11 +555,12 @@ def _check_tags_no_reserved_category(loaded: LoadedRule) -> str | None:
     Defers cleanly if the field shape would already fail (sibling
     predicate ``_check_tags_field_shape`` reports those findings).
     """
+    field = RuleField.TAGS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "tags" not in rule:
+    if rule is None or field not in rule:
         return None
 
-    value = rule["tags"]
+    value = rule[field]
     if not isinstance(value, list):
         return None  # shape predicate owns this finding
 
@@ -545,7 +572,7 @@ def _check_tags_no_reserved_category(loaded: LoadedRule) -> str | None:
             continue
         if category.startswith(_RESERVED_TAG_CATEGORY_PREFIX):
             return (
-                f"{loaded.path}: 'tags[{i}]' uses reserved category "
+                f"{loaded.path}: '{field}[{i}]' uses reserved category "
                 f"{category!r} (prefix {_RESERVED_TAG_CATEGORY_PREFIX!r} "
                 f"is owned by the library)"
             )
@@ -590,40 +617,43 @@ def _check_typeclass_resolvable(loaded: LoadedRule) -> str | None:
     Defers cleanly if the field is absent or non-string (Tier 1 owns
     those findings; Tier 3 just adds the resolvability layer).
     """
+    field = RuleField.TYPECLASS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "typeclass" not in rule:
+    if rule is None or field not in rule:
         return None
-    value = rule["typeclass"]
+    value = rule[field]
     if not isinstance(value, str) or not value.strip():
         return None
 
     resolved, error = _resolve_dotted(value)
     if error is not None:
-        return f"{loaded.path}: 'typeclass' — {error}"
+        return f"{loaded.path}: '{field}' — {error}"
     if not isinstance(resolved, type):
         return (
-            f"{loaded.path}: 'typeclass' {value!r} resolved but is not a "
+            f"{loaded.path}: '{field}' {value!r} resolved but is not a "
             f"class (got {type(resolved).__name__})"
         )
     return None
 
 
-def _check_spawn_with_typeclass_resolvable(loaded: LoadedRule) -> str | None:
-    """Tier 3: ``spawn_with_typeclass`` (when present) resolves to a class."""
+def _check_condition_registered(loaded: LoadedRule) -> str | None:
+    """Tier 3: ``condition`` (when present) names a registered condition.
+
+    The registry fills at server start, so this is engine-only. Defers
+    cleanly when the field is absent or malformed — Tier 1 owns those.
+    """
+    field = RuleField.CONDITION.value
     rule = _rule_or_none(loaded)
-    if rule is None or "spawn_with_typeclass" not in rule:
+    if rule is None or field not in rule:
         return None
-    value = rule["spawn_with_typeclass"]
+    value = rule[field]
     if not isinstance(value, str) or not value.strip():
         return None
 
-    resolved, error = _resolve_dotted(value)
-    if error is not None:
-        return f"{loaded.path}: 'spawn_with_typeclass' — {error}"
-    if not isinstance(resolved, type):
+    if get_condition(value) is None:
         return (
-            f"{loaded.path}: 'spawn_with_typeclass' {value!r} resolved but is "
-            f"not a class (got {type(resolved).__name__})"
+            f"{loaded.path}: '{field}' {value!r} is not registered — "
+            f"register it with register_condition() at server start"
         )
     return None
 
@@ -642,10 +672,11 @@ def _check_typeclass_ms_at_post_spawn_callable(loaded: LoadedRule) -> str | None
     the resolved class actually declares the attribute and it's not
     callable.
     """
+    field = RuleField.TYPECLASS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "typeclass" not in rule:
+    if rule is None or field not in rule:
         return None
-    value = rule["typeclass"]
+    value = rule[field]
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -683,10 +714,11 @@ def _check_typeclass_ms_at_post_spawn_signature(loaded: LoadedRule) -> str | Non
     callable (rare — some C-extension callables); runtime will surface
     those.
     """
+    field = RuleField.TYPECLASS.value
     rule = _rule_or_none(loaded)
-    if rule is None or "typeclass" not in rule:
+    if rule is None or field not in rule:
         return None
-    value = rule["typeclass"]
+    value = rule[field]
     if not isinstance(value, str) or not value.strip():
         return None
 
@@ -755,10 +787,11 @@ def _diagnostic_area_tag_rooms_exist(loaded: LoadedRule) -> None:
 
     Side effect: emits ms_log at WARN level. Returns None.
     """
+    field = RuleField.AREA_TAG.value
     rule = _rule_or_none(loaded)
-    if rule is None or "area_tag" not in rule:
+    if rule is None or field not in rule:
         return
-    value = rule["area_tag"]
+    value = rule[field]
     if not isinstance(value, str) or not value.strip():
         return
 
@@ -778,47 +811,10 @@ def _diagnostic_area_tag_rooms_exist(loaded: LoadedRule) -> None:
 
     if count == 0:
         ms_log(
-            f"{loaded.path}: rule_id={rule.get('rule_id')} "
-            f"area_tag={value!r} has 0 tagged rooms — spawns will be "
+            f"{loaded.path}: {RuleField.RULE_ID.value}="
+            f"{rule.get(RuleField.RULE_ID.value)} "
+            f"{field}={value!r} has 0 tagged rooms — spawns will be "
             f"skipped until rooms are tagged",
-            level="WARN",
-        )
-
-
-def _diagnostic_den_room_tag_rooms_exist(loaded: LoadedRule) -> None:
-    """Tier 4 diagnostic: WARN-log if ``den_room_tag`` references zero tagged rooms.
-
-    Same one-log-per-deploy semantic as the area_tag diagnostic.
-    Field is optional — if absent, no diagnostic.
-
-    Side effect: emits ms_log at WARN level. Returns None.
-    """
-    rule = _rule_or_none(loaded)
-    if rule is None or "den_room_tag" not in rule:
-        return
-    value = rule["den_room_tag"]
-    if not isinstance(value, str) or not value.strip():
-        return
-
-    # Deliberately inside the function, not at module scope. This module
-    # stays importable without an engine so ``ms-validate`` can run Tiers
-    # 1 and 2 with no Evennia at all (decision #19); only the Tier 4
-    # diagnostics, which are engine-only by definition, reach for the ORM.
-    # The model rather than the typeclass: the query counts rooms by tag,
-    # and tags live on ObjectDB through Evennia's own m2m tables.
-    from evennia.objects.models import ObjectDB
-    from .config import get_area_tag_category
-
-    count = ObjectDB.objects.filter(
-        db_tags__db_key=value,
-        db_tags__db_category=get_area_tag_category(),
-    ).count()
-
-    if count == 0:
-        ms_log(
-            f"{loaded.path}: rule_id={rule.get('rule_id')} "
-            f"den_room_tag={value!r} has 0 tagged rooms — pack/random "
-            f"fallback will be used instead of the den",
             level="WARN",
         )
 
@@ -848,6 +844,7 @@ class Validator:
     # Tier 1 — pure (LoadedRule) -> str | None. Always active.
     PER_RULE_PREDICATES: tuple = (
         _check_rule_is_mapping,
+        _check_no_unknown_fields,
         _check_rule_id_well_formed,
         _check_typeclass_well_formed,
         _check_key_well_formed,
@@ -859,8 +856,8 @@ class Validator:
         _check_max_per_room_well_formed,
         _check_desc_well_formed,
         _check_attrs_well_formed,
-        _check_spawn_with_typeclass_well_formed,
-        _check_den_room_tag_well_formed,
+        _check_pack_well_formed,
+        _check_condition_well_formed,
         _check_tags_field_shape,
         _check_tags_no_reserved_category,
     )
@@ -870,9 +867,9 @@ class Validator:
     # consumer modules; the assumption is the engine is up.
     EVENNIA_ONLY_PREDICATES: tuple = (
         _check_typeclass_resolvable,
-        _check_spawn_with_typeclass_resolvable,
         _check_typeclass_ms_at_post_spawn_callable,
         _check_typeclass_ms_at_post_spawn_signature,
+        _check_condition_registered,
     )
 
     # Tier 4 — diagnostic checks. DIFFERENT CONTRACT from predicates:
@@ -881,7 +878,6 @@ class Validator:
     # Tier 1+2 pass on a rule (decision #24).
     EVENNIA_DIAGNOSTICS: tuple = (
         _diagnostic_area_tag_rooms_exist,
-        _diagnostic_den_room_tag_rooms_exist,
     )
 
     def __init__(self, definitions: Definitions, *, evennia_runtime: bool = False):
@@ -962,7 +958,7 @@ class Validator:
         returned True), so the rule_id is guaranteed to be a valid
         non-negative integer — no defensive guards needed.
         """
-        rule_id = loaded.rule["rule_id"]
+        rule_id = loaded.rule[RuleField.RULE_ID.value]
         seen = self.seen_ids.setdefault(loaded.path, set())
         if rule_id in seen:
             self._record_finding(

@@ -60,7 +60,6 @@ from evennia_mob_spawner.commands import (
     is_router_process,
     should_pre_validate,
 )
-from evennia_mob_spawner.commands import _is_stalled, check_scope_not_stalled
 from evennia_mob_spawner.finder import Finder, FoundLocation
 from evennia_mob_spawner.loader import Loader, LoadResult
 from evennia_mob_spawner.validator import LoadedRule, Validator
@@ -121,6 +120,24 @@ class PackageSmokeTest(TestCase):
         self.assertIs(
             evennia_mob_spawner.get_area_tag_category, config.get_area_tag_category
         )
+
+    def test_runtime_entry_points_exported(self):
+        """PKG-04"""
+        from evennia_mob_spawner import conditions, runtime
+
+        for name in ("register_condition", "start_mob_spawner"):
+            self.assertIn(name, evennia_mob_spawner.__all__)
+        self.assertIs(
+            evennia_mob_spawner.register_condition, conditions.register_condition
+        )
+        self.assertIs(evennia_mob_spawner.start_mob_spawner, runtime.start_mob_spawner)
+
+    def test_spawn_rule_lookup_exported(self):
+        """PKG-05"""
+        from evennia_mob_spawner import runtime
+
+        self.assertIn("spawn_rule_for", evennia_mob_spawner.__all__)
+        self.assertIs(evennia_mob_spawner.spawn_rule_for, runtime.spawn_rule_for)
 
 
 MOB_SPAWNER_LOG = "mob_spawner.log"
@@ -792,8 +809,7 @@ _VALID_RULE = {
     "max_per_room": 2,
     "desc": "hello",
     "attrs": {"hp": 10},
-    "spawn_with_typeclass": "test.Boss",
-    "den_room_tag": "lair",
+    "pack": "test_pack",
 }
 
 
@@ -893,6 +909,54 @@ class RuleMappingPredicateTest(TestCase):
     def test_none_rejected(self):
         finding = self._predicate()(LoadedRule("p", None))
         self.assertIn("got NoneType", finding)
+
+
+class RuleFieldPredicateTest(TestCase):
+    """The fields a rule may carry are the values of ``RuleField``."""
+
+    def test_an_unknown_key_is_refused(self):
+        """SHAPE-79"""
+        from evennia_mob_spawner.validator import _check_no_unknown_fields
+
+        finding = _check_no_unknown_fields(
+            LoadedRule("p", dict(_VALID_RULE, pakc="wolves")),
+        )
+        self.assertIn("'pakc'", finding)
+
+    def test_every_unknown_key_is_named(self):
+        """SHAPE-80"""
+        from evennia_mob_spawner.validator import _check_no_unknown_fields
+
+        finding = _check_no_unknown_fields(
+            LoadedRule("p", dict(_VALID_RULE, pakc="wolves", den_room_tag="lair")),
+        )
+        self.assertIn("'pakc'", finding)
+        self.assertIn("'den_room_tag'", finding)
+
+    def test_rules_using_every_field_pass(self):
+        """SHAPE-81"""
+        # Written out by hand rather than built from RuleField, so a field
+        # the predicates check but the enum lacks is caught here. Two rules,
+        # because the two cooldowns are mutually exclusive.
+        shared = {
+            "typeclass": "test.Foo",
+            "key": "a thing",
+            "area_tag": "test_area",
+            "target": 3,
+            "max_per_room": 2,
+            "desc": "hello",
+            "attrs": {"hp": 10},
+            "pack": "test_pack",
+            "condition": "night_only",
+            "tags": ["plain", {"key": "spawn_gold", "category": "spawn_gold"}],
+        }
+        rules = [
+            dict(shared, rule_id=1, respawn_seconds=30),
+            dict(shared, rule_id=2, death_cooldown_seconds=600),
+        ]
+        validator = Validator(Definitions.from_dict({"levels": []}))
+        validator.validate(LoadResult(rule_sets={"a.yaml": rules}))
+        self.assertEqual(validator.errors, [])
 
 
 class RequiredFieldPredicatesTest(TestCase):
@@ -1151,7 +1215,7 @@ class OptionalStringPredicatesTest(TestCase):
 
     def _rule(self, **fields):
         base = {k: v for k, v in _VALID_RULE.items()
-                if k not in ("desc", "spawn_with_typeclass", "den_room_tag")}
+                if k not in ("desc", "pack", "condition")}
         base.update(fields)
         return base
 
@@ -1172,37 +1236,49 @@ class OptionalStringPredicatesTest(TestCase):
         finding = _check_desc_well_formed(LoadedRule("p", self._rule(desc=42)))
         self.assertIn("'desc' must be a string", finding)
 
-    # spawn_with_typeclass
+    # pack
 
-    def test_spawn_with_typeclass_wrong_type(self):
-        from evennia_mob_spawner.validator import _check_spawn_with_typeclass_well_formed
-        finding = _check_spawn_with_typeclass_well_formed(
-            LoadedRule("p", self._rule(spawn_with_typeclass=[])),
+    def test_pack_absent_passes(self):
+        """SHAPE-73"""
+        from evennia_mob_spawner.validator import _check_pack_well_formed
+        self.assertIsNone(_check_pack_well_formed(LoadedRule("p", self._rule())))
+
+    def test_pack_wrong_type(self):
+        """SHAPE-74"""
+        from evennia_mob_spawner.validator import _check_pack_well_formed
+        finding = _check_pack_well_formed(LoadedRule("p", self._rule(pack=[])))
+        self.assertIn("'pack' must be a string", finding)
+
+    def test_pack_empty_rejected(self):
+        """SHAPE-75"""
+        from evennia_mob_spawner.validator import _check_pack_well_formed
+        finding = _check_pack_well_formed(LoadedRule("p", self._rule(pack="   ")))
+        self.assertIn("'pack' must be a non-empty string", finding)
+
+    # condition
+
+    def test_condition_absent_passes(self):
+        """SHAPE-76"""
+        from evennia_mob_spawner.validator import _check_condition_well_formed
+        self.assertIsNone(
+            _check_condition_well_formed(LoadedRule("p", self._rule()))
         )
-        self.assertIn("'spawn_with_typeclass' must be a string", finding)
 
-    def test_spawn_with_typeclass_empty_rejected(self):
-        from evennia_mob_spawner.validator import _check_spawn_with_typeclass_well_formed
-        finding = _check_spawn_with_typeclass_well_formed(
-            LoadedRule("p", self._rule(spawn_with_typeclass="   ")),
+    def test_condition_wrong_type(self):
+        """SHAPE-77"""
+        from evennia_mob_spawner.validator import _check_condition_well_formed
+        finding = _check_condition_well_formed(
+            LoadedRule("p", self._rule(condition=7)),
         )
-        self.assertIn("must be a non-empty string", finding)
+        self.assertIn("'condition' must be a string", finding)
 
-    # den_room_tag
-
-    def test_den_room_tag_wrong_type(self):
-        from evennia_mob_spawner.validator import _check_den_room_tag_well_formed
-        finding = _check_den_room_tag_well_formed(
-            LoadedRule("p", self._rule(den_room_tag=None)),
+    def test_condition_empty_rejected(self):
+        """SHAPE-78"""
+        from evennia_mob_spawner.validator import _check_condition_well_formed
+        finding = _check_condition_well_formed(
+            LoadedRule("p", self._rule(condition="")),
         )
-        self.assertIn("'den_room_tag' must be a string", finding)
-
-    def test_den_room_tag_empty_rejected(self):
-        from evennia_mob_spawner.validator import _check_den_room_tag_well_formed
-        finding = _check_den_room_tag_well_formed(
-            LoadedRule("p", self._rule(den_room_tag="")),
-        )
-        self.assertIn("must be a non-empty string", finding)
+        self.assertIn("'condition' must be a non-empty string", finding)
 
 
 class OptionalAttrsPredicateTest(TestCase):
@@ -1541,10 +1617,10 @@ class Tier3ResolvabilityTest(TestCase):
     """Tier 3 — engine-runtime predicates for dotted-path resolution.
 
     Tier 3 fires only with ``evennia_runtime=True`` (ms_load); ms-validate
-    (CLI) leaves it off. Three predicates:
+    (CLI) leaves it off. Three checks:
     - `typeclass` resolves to a class
-    - `spawn_with_typeclass` (when present) resolves to a class
     - the resolved `typeclass`'s optional `ms_at_post_spawn` is callable
+    - `condition` (when present) names a registered condition
     """
 
     def _make_validator(self):
@@ -1554,10 +1630,10 @@ class Tier3ResolvabilityTest(TestCase):
         )
 
     def _rule(self, **overrides):
-        # Strip the dotted-path fields from _VALID_RULE; each test fills
+        # Strip the fields Tier 3 resolves from _VALID_RULE; each test fills
         # in what it wants.
         base = {k: v for k, v in _VALID_RULE.items()
-                if k not in ("typeclass", "spawn_with_typeclass")}
+                if k not in ("typeclass", "condition")}
         base.update(overrides)
         return base
 
@@ -1606,47 +1682,44 @@ class Tier3ResolvabilityTest(TestCase):
             ]}))
         self.assertIn("is not a class", v.errors[0])
 
-    # spawn_with_typeclass ---------------------------------------------
+    # condition --------------------------------------------------------
 
-    def test_spawn_with_typeclass_resolvable_passes(self):
+    def test_registered_condition_passes(self):
+        """RESLV-18"""
         v = self._make_validator()
-        v.validate(LoadResult(rule_sets={"a.yaml": [
-            self._rule(typeclass=_FAKE_TC, spawn_with_typeclass=_FAKE_TC),
-        ]}))
+        with mock.patch.dict(
+            "evennia_mob_spawner.conditions._conditions",
+            {"night_only": lambda rule: True},
+        ):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass=_FAKE_TC, condition="night_only"),
+            ]}))
         self.assertEqual(v.errors, [])
 
-    def test_spawn_with_typeclass_absent_passes(self):
-        # Absent is fine — optional field.
+    def test_unregistered_condition_flagged(self):
+        """RESLV-19"""
         v = self._make_validator()
-        v.validate(LoadResult(rule_sets={"a.yaml": [
-            self._rule(typeclass=_FAKE_TC),
-        ]}))
+        from evennia_mob_spawner.errors import ValidatorError
+        with mock.patch.dict(
+            "evennia_mob_spawner.conditions._conditions", {}, clear=True,
+        ):
+            with self.assertRaises(ValidatorError):
+                v.validate(LoadResult(rule_sets={"a.yaml": [
+                    self._rule(typeclass=_FAKE_TC, condition="night_only"),
+                ]}))
+        self.assertIn("'condition'", v.errors[0])
+        self.assertIn("night_only", v.errors[0])
+
+    def test_condition_absent_passes(self):
+        """RESLV-20"""
+        v = self._make_validator()
+        with mock.patch.dict(
+            "evennia_mob_spawner.conditions._conditions", {}, clear=True,
+        ):
+            v.validate(LoadResult(rule_sets={"a.yaml": [
+                self._rule(typeclass=_FAKE_TC),
+            ]}))
         self.assertEqual(v.errors, [])
-
-    def test_spawn_with_typeclass_module_not_importable_flagged(self):
-        v = self._make_validator()
-        from evennia_mob_spawner.errors import ValidatorError
-        with self.assertRaises(ValidatorError):
-            v.validate(LoadResult(rule_sets={"a.yaml": [
-                self._rule(
-                    typeclass=_FAKE_TC,
-                    spawn_with_typeclass="missing.module.Class",
-                ),
-            ]}))
-        self.assertIn("'spawn_with_typeclass'", v.errors[0])
-
-    def test_spawn_with_typeclass_resolves_but_not_a_class_flagged(self):
-        v = self._make_validator()
-        from evennia_mob_spawner.errors import ValidatorError
-        with self.assertRaises(ValidatorError):
-            v.validate(LoadResult(rule_sets={"a.yaml": [
-                self._rule(
-                    typeclass=_FAKE_TC,
-                    spawn_with_typeclass=_FAKE_FUNC,
-                ),
-            ]}))
-        self.assertIn("'spawn_with_typeclass'", v.errors[0])
-        self.assertIn("is not a class", v.errors[0])
 
     # ms_at_post_spawn -------------------------------------------------
 
@@ -1749,7 +1822,7 @@ class Tier4DiagnosticTest(TestCase):
         # Use a real importable class so Tier 3 passes; the diagnostic
         # is what we're isolating.
         base = {k: v for k, v in _VALID_RULE.items()
-                if k not in ("typeclass", "spawn_with_typeclass")}
+                if k not in ("typeclass", "condition")}
         base["typeclass"] = _FAKE_TC
         base.update(overrides)
         return base
@@ -1803,31 +1876,6 @@ class Tier4DiagnosticTest(TestCase):
         self.assertEqual(len(area_warnings), 1)
         self.assertIn("0 tagged rooms", area_warnings[0])
 
-    # den_room_tag -----------------------------------------------------
-
-    def test_den_room_tag_absent_no_warning(self):
-        # _VALID_RULE has den_room_tag — strip it for this test.
-        v = self._make_validator()
-        rule = self._resolvable_rule()
-        rule.pop("den_room_tag", None)
-        logs = self._validate_with_db_count(
-            v, LoadResult(rule_sets={"a.yaml": [rule]}), count=0,
-        )
-        den_warnings = [m for m, lvl in logs
-                        if lvl == "WARN" and "den_room_tag" in m]
-        self.assertEqual(den_warnings, [])
-
-    def test_den_room_tag_with_zero_rooms_logs_warning(self):
-        v = self._make_validator()
-        logs = self._validate_with_db_count(
-            v,
-            LoadResult(rule_sets={"a.yaml": [self._resolvable_rule()]}),
-            count=0,
-        )
-        den_warnings = [m for m, lvl in logs
-                        if lvl == "WARN" and "den_room_tag" in m]
-        self.assertEqual(len(den_warnings), 1)
-
     # Gating: Tier 4 stays off without evennia_runtime ----------------
 
     def test_tier_4_not_run_when_evennia_runtime_false(self):
@@ -1875,99 +1923,77 @@ class Tier4DiagnosticTest(TestCase):
         self.assertEqual(warnings, [])
 
 
-STATE_NAMES = (
-    "spawn_table",
-    "last_spawn_times",
-    "last_death_times",
-    "last_observed_counts",
-    "spawned_last_tick",
-)
+DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
 
 
-class ScriptStateTest(EvenniaWorldTestCase):
-    """How MobSpawnerScript's persistent state is declared and stored.
+class _FakeDate:
+    """A calendar date carrying only ``elapsed_real_seconds``.
 
-    Where DeployerTest and the tick-loop tests cover what the state means,
-    these cover the storage underneath it: that the five names are
-    AttributeProperty descriptors on the class, that assigning through one
-    reaches the database, and that a default is not shared between scripts.
+    The tick reads nothing else from the date, so this drives it second by
+    second without a running clock.
     """
 
-    def _make_script(self, key):
-        from evennia.utils.create import create_script
-        from evennia_mob_spawner.script import MobSpawnerScript
-
-        return create_script(MobSpawnerScript, key=key)
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-
-        for script in MobSpawnerScript.objects.all():
-            script.delete()
-
-    def test_state_01_new_script_starts_with_the_declared_defaults(self):
-        """STATE-01"""
-        import inspect
-
-        from evennia.typeclasses.attributes import AttributeProperty
-        from evennia_mob_spawner.script import MobSpawnerScript
-
-        # getattr_static rather than getattr: reading a descriptor off the
-        # class triggers its __get__ with instance=None, which raises
-        # internally, so plain getattr would report "not declared".
-        for name in STATE_NAMES:
-            descriptor = inspect.getattr_static(MobSpawnerScript, name, None)
-            self.assertIsInstance(
-                descriptor,
-                AttributeProperty,
-                f"{name} is not declared as an AttributeProperty",
-            )
-
-        script = self._make_script("defaults.yaml")
-        self.assertEqual(script.spawn_table, [])
-        self.assertEqual(script.last_spawn_times, {})
-        self.assertEqual(script.last_death_times, {})
-        self.assertEqual(script.last_observed_counts, {})
-        self.assertEqual(script.spawned_last_tick, {})
-
-    def test_state_02_an_assigned_value_persists(self):
-        """STATE-02"""
-        from evennia_mob_spawner.script import MobSpawnerScript
-
-        script = self._make_script("persist.yaml")
-        script.last_spawn_times = {"boss": 1234.5}
-        script_id = script.id
-
-        # Drop the instance from Evennia's idmapper cache, so the value has
-        # to come back from the database rather than from the object we just
-        # wrote to. Without this the assertion passes on a plain Python
-        # attribute that would never have survived a restart.
-        script.flush_from_cache(force=True)
-        del script
-
-        fresh = MobSpawnerScript.objects.get(id=script_id)
-        self.assertEqual(fresh.last_spawn_times, {"boss": 1234.5})
-
-    def test_state_03_two_scripts_do_not_share_a_default(self):
-        """STATE-03"""
-        one = self._make_script("one.yaml")
-        two = self._make_script("two.yaml")
-
-        # In-place, because that is what a shared mutable default would leak
-        # through. A wholesale assignment rebinds and would pass either way.
-        one.last_spawn_times["boss"] = 1.0
-
-        self.assertEqual(two.last_spawn_times, {})
+    def __init__(self, second):
+        self.elapsed_real_seconds = float(second)
 
 
-class DeployerTest(EvenniaWorldTestCase):
-    """End-to-end deployment: script lookup-or-create, swap, preserve, purge.
+def _sessioned(room, key="a player"):
+    """An object in ``room`` reporting one session — a connected player."""
+    from evennia import DefaultCharacter
+    from evennia.utils.create import create_object
 
-    Uses real Evennia ``create_script`` / DB queries against the test
-    database (``runtests.py`` calls ``evennia._init()`` which sets up
-    the typeclass registry). The script's ``at_repeat`` is a no-op
-    stub at this stage — these tests cover lifecycle plumbing only,
-    not the (still-pending) tick loop.
+    obj = create_object(DefaultCharacter, key=key, location=room)
+    obj.sessions.count = lambda: 1
+    return obj
+
+
+class SpawnerTestCase(EvenniaWorldTestCase):
+    """Base for tests that drive the running spawner.
+
+    The in-memory table is module state, so it outlives each test's database
+    rollback. Reloading it from the clean database at the start of every test
+    stops one test's rules leaking into the next.
+    """
+
+    def setUp(self):
+        super().setUp()
+        from evennia_mob_spawner import runtime
+
+        runtime.load_rules()
+
+
+class SpawnRuleModelTest(EvenniaWorldTestCase):
+    """The rule table — where rules and their timers are stored."""
+
+    def test_the_table_is_in_the_default_database(self):
+        """MODEL-01"""
+        from django.db import connections, router
+        from evennia_mob_spawner.models import SpawnRule
+
+        self.assertEqual(router.db_for_write(SpawnRule), "default")
+        self.assertIn(
+            SpawnRule._meta.db_table,
+            connections["default"].introspection.table_names(),
+        )
+
+    def test_file_and_rule_id_are_unique_together(self):
+        """MODEL-02"""
+        from django.db import IntegrityError, transaction
+        from evennia_mob_spawner.models import SpawnRule
+
+        SpawnRule.objects.create(file="a.yaml", rule_id=1, rule={})
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                SpawnRule.objects.create(file="a.yaml", rule_id=1, rule={})
+        # The same rule_id in another file is a different rule.
+        SpawnRule.objects.create(file="b.yaml", rule_id=1, rule={})
+
+
+class DeployerTest(SpawnerTestCase):
+    """``ms_load``'s upsert: one row per rule, keyed on ``(file, rule_id)``.
+
+    The Deployer writes the rows. The in-memory table the tick reads is
+    swapped from them on the reactor once the load has completed.
     """
 
     def _make_deployer(self):
@@ -1980,7 +2006,7 @@ class DeployerTest(EvenniaWorldTestCase):
         # re-validate — rules arrive already validated.
         base = {
             "rule_id": rule_id,
-            "typeclass": "evennia.objects.objects.DefaultObject",
+            "typeclass": DEFAULT_OBJECT,
             "key": "a thing",
             "area_tag": "test_area",
             "target": 1,
@@ -1990,126 +2016,147 @@ class DeployerTest(EvenniaWorldTestCase):
         base.update(overrides)
         return base
 
-    def tearDown(self):
-        # Tests share the in-memory DB across methods within a class;
-        # Django's TestCase resets per-test, but ScriptDB rows created
-        # via create_script can persist into the next test if not
-        # cleaned up. Belt-and-suspenders.
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for script in MobSpawnerScript.objects.all():
-            script.delete()
+    def _deploy(self, rule_sets):
+        self._make_deployer().deploy(LoadResult(rule_sets=rule_sets))
 
-    def test_deploy_creates_new_script(self):
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={
-            "a.yaml": [self._rule(1)],
-        }))
+    @staticmethod
+    def _rows(path="a.yaml"):
+        from evennia_mob_spawner.models import SpawnRule
+        return {row.rule_id: row for row in SpawnRule.objects.filter(file=path)}
 
-        from evennia_mob_spawner.script import MobSpawnerScript
-        scripts = MobSpawnerScript.objects.filter(db_key="a.yaml")
-        self.assertEqual(scripts.count(), 1)
-        script = scripts.first()
-        self.assertEqual(len(script.db.spawn_table), 1)
-        self.assertEqual(script.db.spawn_table[0]["rule_id"], 1)
-
-    def test_deploy_separate_files_creates_separate_scripts(self):
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={
-            "a.yaml": [self._rule(1)],
-            "b.yaml": [self._rule(1)],   # same rule_id, different file
-        }))
-
-        from evennia_mob_spawner.script import MobSpawnerScript
-        self.assertEqual(MobSpawnerScript.objects.filter(db_key="a.yaml").count(), 1)
-        self.assertEqual(MobSpawnerScript.objects.filter(db_key="b.yaml").count(), 1)
-
-    def test_redeploy_reuses_existing_script(self):
-        # Two deploys of the same path should NOT create two scripts.
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1)]}))
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1)]}))
-
-        from evennia_mob_spawner.script import MobSpawnerScript
-        self.assertEqual(MobSpawnerScript.objects.filter(db_key="a.yaml").count(), 1)
-
-    def test_swap_replaces_spawn_table(self):
-        deployer = self._make_deployer()
-        # First deploy: rules 1, 2.
-        deployer.deploy(LoadResult(rule_sets={
-            "a.yaml": [self._rule(1), self._rule(2)],
-        }))
-        # Second deploy: rules 2, 3 — rule 1 vanished, rule 3 is new.
-        deployer.deploy(LoadResult(rule_sets={
-            "a.yaml": [self._rule(2), self._rule(3)],
-        }))
-
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        ids = {r["rule_id"] for r in script.db.spawn_table}
-        self.assertEqual(ids, {2, 3})
+    @staticmethod
+    def _set_timers(path, rule_id, spawn, death):
+        from evennia_mob_spawner.models import SpawnRule
+        SpawnRule.objects.filter(file=path, rule_id=rule_id).update(
+            last_spawn_time=spawn, last_death_time=death,
+        )
 
     def test_state_preserved_for_surviving_rules(self):
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(2)]}))
-
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        # Simulate runtime accumulation of state across ticks.
-        script.db.last_spawn_times = {1: 1000.0, 2: 2000.0}
-        script.db.last_death_times = {1: 1500.0, 2: 2500.0}
-        script.db.last_observed_counts = {1: 5, 2: 3}
+        """DEP-05"""
+        self._deploy({"a.yaml": [self._rule(1), self._rule(2)]})
+        self._set_timers("a.yaml", 1, 1000.0, 1500.0)
+        self._set_timers("a.yaml", 2, 2000.0, 2500.0)
 
         # Re-deploy with both rules unchanged.
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(2)]}))
+        self._deploy({"a.yaml": [self._rule(1), self._rule(2)]})
 
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        self.assertEqual(script.db.last_spawn_times, {1: 1000.0, 2: 2000.0})
-        self.assertEqual(script.db.last_death_times, {1: 1500.0, 2: 2500.0})
-        self.assertEqual(script.db.last_observed_counts, {1: 5, 2: 3})
+        rows = self._rows()
+        self.assertEqual(
+            (rows[1].last_spawn_time, rows[1].last_death_time), (1000.0, 1500.0),
+        )
+        self.assertEqual(
+            (rows[2].last_spawn_time, rows[2].last_death_time), (2000.0, 2500.0),
+        )
 
     def test_state_purged_for_removed_rules(self):
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(2)]}))
-
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        script.db.last_spawn_times = {1: 1000.0, 2: 2000.0}
-        script.db.last_death_times = {1: 1500.0, 2: 2500.0}
-        script.db.last_observed_counts = {1: 5, 2: 3}
+        """DEP-06"""
+        self._deploy({"a.yaml": [self._rule(1), self._rule(2)]})
 
         # Re-deploy with rule 1 removed.
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(2)]}))
+        self._deploy({"a.yaml": [self._rule(2)]})
 
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        self.assertEqual(script.db.last_spawn_times, {2: 2000.0})
-        self.assertEqual(script.db.last_death_times, {2: 2500.0})
-        self.assertEqual(script.db.last_observed_counts, {2: 3})
+        self.assertEqual(set(self._rows()), {2})
 
     def test_new_rule_starts_with_no_bookkeeping(self):
-        # rule_id 3 is brand new — no entry in any state dict.
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1)]}))
+        """DEP-07"""
+        self._deploy({"a.yaml": [self._rule(1)]})
+        self._set_timers("a.yaml", 1, 1000.0, 1500.0)
 
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        script.db.last_spawn_times = {1: 1000.0}
+        self._deploy({"a.yaml": [self._rule(1), self._rule(3)]})
 
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule(1), self._rule(3)]}))
+        rows = self._rows()
+        self.assertEqual(rows[1].last_spawn_time, 1000.0)
+        self.assertIsNone(rows[3].last_spawn_time)
+        self.assertIsNone(rows[3].last_death_time)
 
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        self.assertEqual(script.db.last_spawn_times, {1: 1000.0})
-        self.assertNotIn(3, script.db.last_spawn_times)
+    def test_a_first_load_writes_a_row_per_rule(self):
+        """DEP-09"""
+        rule = self._rule(1, key="a wolf")
+        self._deploy({"a.yaml": [rule]})
 
-    def test_empty_load_result_creates_no_scripts(self):
-        deployer = self._make_deployer()
-        deployer.deploy(LoadResult(rule_sets={}))
+        rows = self._rows()
+        self.assertEqual(set(rows), {1})
+        self.assertEqual(rows[1].rule, rule)
 
-        from evennia_mob_spawner.script import MobSpawnerScript
-        self.assertEqual(MobSpawnerScript.objects.count(), 0)
+    def test_an_edited_rule_keeps_its_row(self):
+        """DEP-10"""
+        self._deploy({"a.yaml": [self._rule(1, key="a wolf")]})
+        pk = self._rows()[1].pk
+
+        self._deploy({"a.yaml": [self._rule(1, key="a grey wolf")]})
+
+        row = self._rows()[1]
+        self.assertEqual(row.pk, pk, "an edited rule moved to a new row")
+        self.assertEqual(row.rule["key"], "a grey wolf")
+
+    def test_rows_outside_the_scope_are_untouched(self):
+        """DEP-11"""
+        self._deploy({
+            "a.yaml": [self._rule(1)],
+            "b.yaml": [self._rule(1), self._rule(2)],
+        })
+        before = {rid: (row.pk, row.rule) for rid, row in self._rows("b.yaml").items()}
+
+        self._deploy({"a.yaml": [self._rule(3)]})
+
+        after = {rid: (row.pk, row.rule) for rid, row in self._rows("b.yaml").items()}
+        self.assertEqual(after, before)
+        self.assertEqual(set(self._rows("a.yaml")), {3})
+
+    def test_the_next_tick_runs_newly_loaded_rules(self):
+        """DEP-12"""
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.commands import CmdMsLoad
+
+        _TickLoopFixture.make_room("Test Room 1")
+        self._deploy({"a.yaml": [self._rule(1)]})
+
+        # What ms_load does on the reactor once its worker has deployed.
+        cmd = CmdMsLoad()
+        cmd.caller = mock.Mock()
+        cmd._on_async_return((["ms_load: deployment complete"], True))
+
+        with override_settings(MOB_SPAWNER_TICK_SECONDS=1):
+            runtime.tick(current=_FakeDate(0))
+        self.assertEqual(_TickLoopFixture.count_mobs(DEFAULT_OBJECT), 1)
+
+    def test_a_refused_load_changes_nothing(self):
+        """DEP-13"""
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.commands import CmdMsLoad
+        from evennia_mob_spawner.models import SpawnRule
+
+        # A rule already deployed and loaded, from another file.
+        state = _TickLoopFixture.deploy_rule(self._rule(1), path="existing.yaml")
+        state.last_observed = 5
+        before = [
+            (s.pk, s.file, s.rule, s.last_observed) for s in runtime.rule_states()
+        ]
+
+        reader = FixtureReader({
+            "definitions.yaml": {"levels": []},
+            "index.yaml": {"entries": [{"name": "bad", "kind": "file"}]},
+            # rule_id alone: every other required field is missing.
+            "bad.yaml": {"rules": [{"rule_id": 1}]},
+        })
+        cmd = CmdMsLoad()
+        cmd.caller = mock.Mock()
+        with mock.patch(
+            "evennia_mob_spawner.commands.get_configured_reader",
+            return_value=reader,
+        ):
+            result = cmd._run_pipeline({}, set())
+        cmd._on_async_return(result)
+
+        self.assertFalse(SpawnRule.objects.filter(file="bad.yaml").exists())
+        after = [
+            (s.pk, s.file, s.rule, s.last_observed) for s in runtime.rule_states()
+        ]
+        self.assertEqual(after, before)
 
 
 class _TickLoopFixture:
-    """Helper for TickLoopTest — sets up rooms, deploys a rule, returns script.
+    """Builds tagged rooms, loads rules, and runs them.
 
     Kept as a plain helper class rather than a TestCase mixin so the
     test methods can construct exactly the fixture they need with
@@ -2127,12 +2174,35 @@ class _TickLoopFixture:
         return room
 
     @staticmethod
-    def deploy_rule(rule, path="test.yaml"):
+    def load_rules(rules, path="test.yaml"):
+        """Deploy ``rules`` as one file, load them, return their states in order."""
+        from evennia_mob_spawner import runtime
         from evennia_mob_spawner.deployer import Deployer
         defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={path: [rule]}))
-        from evennia_mob_spawner.script import MobSpawnerScript
-        return MobSpawnerScript.objects.filter(db_key=path).first()
+        Deployer(defs).deploy(LoadResult(rule_sets={path: list(rules)}))
+        runtime.load_rules()
+        by_id = {
+            s.rule["rule_id"]: s for s in runtime.rule_states() if s.file == path
+        }
+        return [by_id[rule["rule_id"]] for rule in rules]
+
+    @staticmethod
+    def deploy_rule(rule, path="test.yaml"):
+        """Deploy and load one rule; return its state."""
+        return _TickLoopFixture.load_rules([rule], path=path)[0]
+
+    @staticmethod
+    def run(state):
+        """One pass over ``state``'s rule, now."""
+        from evennia_mob_spawner import runtime
+        runtime.run_rule(state, time.time())
+
+    @staticmethod
+    def tick(second, n=1):
+        """One calendar second, with ``N`` slots."""
+        from evennia_mob_spawner import runtime
+        with override_settings(MOB_SPAWNER_TICK_SECONDS=n):
+            runtime.tick(current=_FakeDate(second))
 
     @staticmethod
     def count_mobs(typeclass, area_tag="test_area"):
@@ -2144,22 +2214,92 @@ class _TickLoopFixture:
         ).count()
 
 
-class TickLoopTest(EvenniaWorldTestCase):
-    """Tick-loop behaviour: observe / cooldown / spawn / death detection.
-
-    Each test calls ``script.at_repeat()`` directly rather than
-    waiting for Evennia's timer — gives deterministic control over
-    when ticks fire.
-    """
+class BootTest(SpawnerTestCase):
+    """``start_mob_spawner`` — what the game's ``at_server_start()`` calls."""
 
     def tearDown(self):
-        # Clean up scripts created during the test. Django's TestCase
-        # rolls back the DB so rooms/mobs don't need explicit cleanup.
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+        from evennia_calendar.service import unregister_signal
+        from evennia_mob_spawner.config import _TICK_SIGNAL_NAME
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
+        unregister_signal(_TICK_SIGNAL_NAME)
+        super().tearDown()
+
+    @staticmethod
+    def _row(rule_id, **fields):
+        from evennia_mob_spawner.models import SpawnRule
+        rule = {
+            "rule_id": rule_id,
+            "typeclass": DEFAULT_OBJECT,
+            "key": "a test mob",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "death_cooldown_seconds": 3600,
+        }
+        return SpawnRule.objects.create(
+            file="boot.yaml", rule_id=rule_id, rule=rule, **fields,
+        )
+
+    def _assert_registered(self):
+        # The calendar refuses a name already in use, so a refusal is the
+        # proof the tick holds it.
+        from django.dispatch import Signal
+        from evennia_calendar.service import register_signal
+        from evennia_mob_spawner.config import _TICK_SIGNAL_NAME
+
+        with self.assertRaises(ValueError):
+            register_signal(Signal(), key=lambda date: 0, name=_TICK_SIGNAL_NAME)
+
+    def test_loads_every_row(self):
+        """BOOT-01"""
+        from evennia_mob_spawner import runtime
+
+        rows = [self._row(1), self._row(2)]
+        runtime.start_mob_spawner()
+        self.assertEqual(
+            [s.pk for s in runtime.rule_states()], [row.pk for row in rows],
+        )
+
+    def test_registers_the_tick_with_the_calendar(self):
+        """BOOT-02"""
+        from evennia_mob_spawner import runtime
+
+        runtime.start_mob_spawner()
+        self._assert_registered()
+
+    def test_a_second_call_is_harmless(self):
+        """BOOT-03"""
+        from evennia_mob_spawner import runtime
+
+        runtime.start_mob_spawner()
+        runtime.start_mob_spawner()
+        self._assert_registered()
+
+    def test_timers_come_back_from_the_rows(self):
+        """BOOT-04"""
+        from evennia_mob_spawner import runtime
+
+        _TickLoopFixture.make_room("Boss Room")
+        # Killed ten seconds before the restart, an hour's cooldown.
+        self._row(1, last_death_time=time.time() - 10)
+
+        runtime.start_mob_spawner()
+        _TickLoopFixture.tick(0)
+
+        self.assertEqual(
+            _TickLoopFixture.count_mobs(DEFAULT_OBJECT), 0,
+            "a boss killed before the restart respawned straight after it",
+        )
+
+
+class TickLoopTest(SpawnerTestCase):
+    """The tick: slot selection, the enabled flag, and the per-rule pass.
+
+    Tests either run one rule's pass directly (``_TickLoopFixture.run``) or
+    drive the calendar receiver second by second (``_TickLoopFixture.tick``).
+    """
+
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _basic_rule(self, **overrides):
         rule = {
@@ -2174,110 +2314,90 @@ class TickLoopTest(EvenniaWorldTestCase):
         rule.update(overrides)
         return rule
 
+    def _death_cooldown_rule(self, seconds, **overrides):
+        rule = self._basic_rule(death_cooldown_seconds=seconds, **overrides)
+        rule.pop("respawn_seconds")
+        return rule
+
+    @staticmethod
+    def _kill_one():
+        from evennia.objects.models import ObjectDB
+        ObjectDB.objects.filter(db_typeclass_path=DEFAULT_OBJECT).first().delete()
+
     def test_empty_spawn_table_does_nothing(self):
-        # Script with no rules at all — tick is a no-op, no mobs spawn.
-        from evennia_mob_spawner.script import MobSpawnerScript
-        from evennia.utils.create import create_script
-        script = create_script(
-            typeclass=MobSpawnerScript,
-            key="empty.yaml",
-            persistent=True,
-        )
-        script.at_repeat()
+        """TICK-01"""
+        _TickLoopFixture.make_room("Test Room 1")
+        _TickLoopFixture.tick(0)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
 
     def test_tick_spawns_when_below_target(self):
+        """TICK-02"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
-        script.at_repeat()
+        state = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
 
     def test_tick_skips_when_at_target(self):
+        """TICK-03"""
         _TickLoopFixture.make_room("Test Room 1")
         _TickLoopFixture.make_room("Test Room 2")
-        script = _TickLoopFixture.deploy_rule(
+        state = _TickLoopFixture.deploy_rule(
             self._basic_rule(target=2, max_per_room=1),
         )
-        # First tick spawns mob 1.
-        script.at_repeat()
-        # Second tick spawns mob 2 (cooldown=0).
-        script.at_repeat()
+        _TickLoopFixture.run(state)
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2)
-        # Third tick should NOT spawn — already at target.
-        script.at_repeat()
+        # A third pass should NOT spawn — already at target.
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2)
 
     def test_cooldown_blocks_immediate_respawn(self):
+        """TICK-04"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(
+        state = _TickLoopFixture.deploy_rule(
             self._basic_rule(target=2, max_per_room=2, respawn_seconds=3600),
         )
-        # First tick spawns mob 1.
-        script.at_repeat()
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
-        # Second tick should NOT spawn — cooldown hasn't elapsed.
-        script.at_repeat()
+        # A second pass should NOT spawn — cooldown hasn't elapsed.
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
 
     def test_death_cooldown_uses_death_time_not_spawn_time(self):
+        """TICK-05"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(
-            self._basic_rule(target=1, death_cooldown_seconds=0)
-        )
-        # Strip respawn_seconds (the _basic_rule default).
-        rule = script.db.spawn_table[0]
-        rule.pop("respawn_seconds", None)
-        script.db.spawn_table = [rule]
+        state = _TickLoopFixture.deploy_rule(self._death_cooldown_rule(0))
 
-        # First tick spawns. Population = 1, target = 1.
-        script.at_repeat()
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
-        # Same tick again, no death yet — at target, no spawn.
-        script.at_repeat()
+        # Again, no death yet — at target, no spawn.
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
-        # Simulate a death by deleting the mob.
-        from evennia.objects.models import ObjectDB
-        mob = ObjectDB.objects.filter(
-            db_typeclass_path=self.DEFAULT_OBJECT,
-        ).first()
-        mob.delete()
-        # Next tick should detect the death AND respawn (cooldown=0).
-        script.at_repeat()
+
+        self._kill_one()
+        # The next pass detects the death AND respawns (cooldown 0).
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
-        # last_death_times should have been stamped for the rule.
-        self.assertIn(1, script.db.last_death_times)
+        self.assertIsNotNone(state.last_death_time)
 
     def test_no_room_with_area_tag_skips_silently(self):
-        # No rooms with the area_tag exist — the rule can't find a room.
-        # Should not spawn, should not raise; tick-time WARN logged.
-        script = _TickLoopFixture.deploy_rule(self._basic_rule())
-        script.at_repeat()
+        """TICK-06"""
+        state = _TickLoopFixture.deploy_rule(self._basic_rule())
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
 
     def test_max_per_room_respected(self):
+        """TICK-07"""
         # max_per_room=1, target=3, but only one room — should spawn
         # exactly one mob and skip subsequent attempts.
         _TickLoopFixture.make_room("Only Room")
-        script = _TickLoopFixture.deploy_rule(
+        state = _TickLoopFixture.deploy_rule(
             self._basic_rule(target=3, max_per_room=1),
         )
-        script.at_repeat()
-        script.at_repeat()
-        script.at_repeat()
+        _TickLoopFixture.run(state)
+        _TickLoopFixture.run(state)
+        _TickLoopFixture.run(state)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
-
-    def test_den_room_tag_used_when_present(self):
-        # Two rooms; one tagged as the den. Mob should spawn in the den.
-        ordinary = _TickLoopFixture.make_room("Ordinary Room")
-        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
-        script = _TickLoopFixture.deploy_rule(
-            self._basic_rule(target=1, den_room_tag="test_den"),
-        )
-        script.at_repeat()
-        from evennia.objects.models import ObjectDB
-        mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
-        self.assertEqual(mob.location, den)
-        self.assertNotEqual(mob.location, ordinary)
 
     def test_attrs_applied_to_spawned_mob(self):
         # DEFAULT_OBJECT (stock DefaultObject) declares neither "hp" nor
@@ -2295,11 +2415,11 @@ class TickLoopTest(EvenniaWorldTestCase):
             captured.append((message, level))
 
         _TickLoopFixture.make_room("Test Room 1")
-        with patch("evennia_mob_spawner.script.ms_log", new=fake_log):
-            script = _TickLoopFixture.deploy_rule(
+        with patch("evennia_mob_spawner.runtime.ms_log", new=fake_log):
+            state = _TickLoopFixture.deploy_rule(
                 self._basic_rule(attrs={"hp": 42, "is_alpha": True}),
             )
-            script.at_repeat()
+            _TickLoopFixture.run(state)
 
         from evennia.objects.models import ObjectDB
         mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
@@ -2314,102 +2434,252 @@ class TickLoopTest(EvenniaWorldTestCase):
         self.assertTrue(any("attrs.is_alpha" in m for m in warnings))
 
     def test_desc_override_applied(self):
+        """TICK-10"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(
+        state = _TickLoopFixture.deploy_rule(
             self._basic_rule(desc="A fearsome test mob."),
         )
-        script.at_repeat()
+        _TickLoopFixture.run(state)
         from evennia.objects.models import ObjectDB
         mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
         self.assertEqual(mob.db.desc, "A fearsome test mob.")
 
     def test_area_tag_stamped_on_spawned_mob(self):
+        """TICK-11"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(self._basic_rule())
-        script.at_repeat()
+        state = _TickLoopFixture.deploy_rule(self._basic_rule())
+        _TickLoopFixture.run(state)
         from evennia.objects.models import ObjectDB
         mob = ObjectDB.objects.filter(db_typeclass_path=self.DEFAULT_OBJECT).first()
         self.assertTrue(mob.tags.get("test_area", category="mob_area"))
 
     def test_observed_counts_updated_after_tick(self):
+        """TICK-12"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
-        script.at_repeat()
-        # The two are stored disjoint: last_observed_counts holds the
-        # headcount as seen in step 1 (0, the world before this tick acted),
-        # and spawned_last_tick holds what the tick then added. Step 2 sums
-        # them next tick.
-        self.assertEqual(script.db.last_observed_counts.get(1), 0)
-        self.assertEqual(script.db.spawned_last_tick.get(1), 1)
+        state = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
+        _TickLoopFixture.run(state)
+        # The two are stored disjoint: last_observed holds the headcount as
+        # seen in step 1 (0, the world before this pass acted), and
+        # spawned_last holds what the pass then added. Step 2 sums them on
+        # the next pass.
+        self.assertEqual(state.last_observed, 0)
+        self.assertEqual(state.spawned_last, 1)
 
     def test_last_spawn_time_set_after_spawn(self):
+        """TICK-13"""
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(self._basic_rule())
+        state = _TickLoopFixture.deploy_rule(self._basic_rule())
         before = time.time()
-        script.at_repeat()
+        _TickLoopFixture.run(state)
         after = time.time()
-        ts = script.db.last_spawn_times.get(1)
-        self.assertIsNotNone(ts)
-        self.assertGreaterEqual(ts, before)
-        self.assertLessEqual(ts, after)
+        self.assertIsNotNone(state.last_spawn_time)
+        self.assertGreaterEqual(state.last_spawn_time, before)
+        self.assertLessEqual(state.last_spawn_time, after)
 
     def test_own_spawn_is_not_counted_as_a_death(self):
-        # TICK-15. The `spawned_last_tick` term of the death formula exists
-        # so the script's own spawn — which inflates the population between
-        # one observation and the next — is not read as a kill on the
-        # following tick. A false death stamps last_death_times and, for a
-        # death_cooldown rule, restarts the clock every single tick.
+        """TICK-15"""
+        # The `spawned_last` term of the death formula exists so the pass's
+        # own spawn — which inflates the population between one observation
+        # and the next — is not read as a kill on the following pass. A
+        # false death stamps last_death_time and, for a death_cooldown rule,
+        # restarts the clock on every pass.
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(
+        state = _TickLoopFixture.deploy_rule(
             self._basic_rule(target=2, max_per_room=2),
         )
-        script.at_repeat()                      # spawns one
+        _TickLoopFixture.run(state)             # spawns one
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
 
-        script.at_repeat()                      # nothing died in between
-        self.assertNotIn(
-            1, script.db.last_death_times or {},
-            "the script read its own spawn as a death",
+        _TickLoopFixture.run(state)             # nothing died in between
+        self.assertIsNone(
+            state.last_death_time, "the pass read its own spawn as a death",
         )
 
     def test_first_tick_against_pre_existing_mobs_detects_no_death(self):
-        # TICK-16. Decision #11: a fresh script starts with
-        # last_observed_count = 0, so deaths comes out non-positive when
-        # mobs are already in the world. No special-case branch.
-        room = _TickLoopFixture.make_room("Test Room 1")
-        rule = self._basic_rule(target=1)
-        script = _TickLoopFixture.deploy_rule(rule)
-        script._spawn_one(rule, room)           # pre-existing, tagged mob
+        """TICK-16"""
+        # Decision #11: a freshly loaded rule starts with last_observed = 0,
+        # so deaths comes out non-positive when mobs are already in the
+        # world. No special-case branch.
+        from evennia_mob_spawner import runtime
 
-        script.at_repeat()                      # the script's first tick
-        self.assertNotIn(
-            1, script.db.last_death_times or {},
+        room = _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._basic_rule(target=1))
+        runtime.spawn_one(state, room)          # pre-existing, tagged mob
+
+        _TickLoopFixture.run(state)             # the rule's first pass
+        self.assertIsNone(
+            state.last_death_time,
             "a pre-existing population was read as a wave of deaths",
         )
 
     def test_bad_rule_does_not_break_tick(self):
+        """TICK-14"""
         # Decision #14: one bad rule doesn't take down the whole tick.
-        # Rule 2 has an unresolvable typeclass; Rule 1 is fine.
+        # The bad rule is first in the file, so it runs first.
         _TickLoopFixture.make_room("Test Room 1")
-        good = self._basic_rule(rule_id=1, target=1, max_per_room=1)
-        bad = {
-            "rule_id": 2,
-            "typeclass": "does.not.exist.AnyClass",
-            "key": "a broken mob",
-            "area_tag": "test_area",
-            "target": 1,
-            "max_per_room": 1,
-            "respawn_seconds": 0,
-        }
-        from evennia_mob_spawner.deployer import Deployer
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={"mixed.yaml": [good, bad]}))
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="mixed.yaml").first()
-        # Tick should NOT raise even though rule 2's typeclass is bogus.
-        script.at_repeat()
-        # The good rule did spawn its mob.
+        bad = self._basic_rule(rule_id=1, typeclass="does.not.exist.AnyClass")
+        good = self._basic_rule(rule_id=2)
+        _TickLoopFixture.load_rules([bad, good], path="mixed.yaml")
+
+        _TickLoopFixture.tick(0)
         self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    # -- the calendar receiver ---------------------------------------
+
+    def test_a_disabled_spawner_does_nothing(self):
+        """TICK-17"""
+        from evennia_mob_spawner import runtime
+
+        _TickLoopFixture.make_room("Test Room 1")
+        _TickLoopFixture.deploy_rule(self._basic_rule())
+        runtime.set_enabled(False)
+
+        _TickLoopFixture.tick(0)
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
+
+    def test_only_the_seconds_slot_runs(self):
+        """TICK-18"""
+        from evennia_mob_spawner import runtime
+
+        _TickLoopFixture.make_room("Test Room 1")
+        states = _TickLoopFixture.load_rules(
+            [self._basic_rule(rule_id=i) for i in (1, 2, 3)],
+        )
+
+        _TickLoopFixture.tick(states[0].pk, n=3)
+
+        self.assertEqual(
+            [runtime.count_living(s) for s in states], [1, 0, 0],
+        )
+
+    def test_every_rule_runs_once_per_cycle(self):
+        """TICK-19"""
+        from evennia_mob_spawner import runtime
+
+        _TickLoopFixture.make_room("Test Room 1")
+        # A target of 5 would let a rule that ran twice show it.
+        states = _TickLoopFixture.load_rules([
+            self._basic_rule(rule_id=i, target=5, max_per_room=5)
+            for i in (1, 2, 3)
+        ])
+
+        for second in (100, 101, 102):
+            _TickLoopFixture.tick(second, n=3)
+
+        self.assertEqual(
+            [runtime.count_living(s) for s in states], [1, 1, 1],
+        )
+
+    # -- what reaches the row ----------------------------------------
+
+    @staticmethod
+    def _row(state):
+        from evennia_mob_spawner.models import SpawnRule
+        return SpawnRule.objects.get(pk=state.pk)
+
+    def test_a_spawn_time_reaches_the_row(self):
+        """TICK-20"""
+        _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._basic_rule())
+        _TickLoopFixture.run(state)
+
+        self.assertIsNotNone(state.last_spawn_time)
+        self.assertEqual(self._row(state).last_spawn_time, state.last_spawn_time)
+
+    def test_a_death_time_reaches_the_row(self):
+        """TICK-21"""
+        _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._death_cooldown_rule(3600))
+        _TickLoopFixture.run(state)
+        self._kill_one()
+        _TickLoopFixture.run(state)
+
+        self.assertIsNotNone(state.last_death_time)
+        self.assertEqual(self._row(state).last_death_time, state.last_death_time)
+
+    def test_rules_are_read_from_memory(self):
+        """TICK-22"""
+        from evennia_mob_spawner.models import SpawnRule
+
+        _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(
+            self._basic_rule(target=1, max_per_room=3),
+        )
+        edited = dict(state.rule, target=3)
+        SpawnRule.objects.filter(pk=state.pk).update(rule=edited)
+
+        for second in (0, 1, 2):
+            _TickLoopFixture.tick(second)
+
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    # -- conditions --------------------------------------------------
+
+    def _with_conditions(self, conditions):
+        return mock.patch.dict(
+            "evennia_mob_spawner.conditions._conditions", conditions, clear=True,
+        )
+
+    def test_a_condition_answering_no_blocks_the_spawn(self):
+        """TICK-23"""
+        _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._basic_rule(condition="never"))
+
+        with self._with_conditions({"never": lambda rule: False}):
+            _TickLoopFixture.run(state)
+
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
+        self.assertIsNone(state.last_spawn_time)
+        self.assertIsNone(state.last_death_time)
+
+    def test_a_condition_answering_yes_lets_it_spawn(self):
+        """TICK-24"""
+        _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._basic_rule(condition="always"))
+
+        with self._with_conditions({"always": lambda rule: True}):
+            _TickLoopFixture.run(state)
+
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+
+    def test_the_condition_is_called_with_the_rule(self):
+        """TICK-25"""
+        _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._basic_rule(condition="record"))
+        seen = []
+
+        def record(rule):
+            seen.append(rule)
+            return True
+
+        with self._with_conditions({"record": record}):
+            _TickLoopFixture.run(state)
+
+        self.assertEqual(seen, [state.rule])
+
+    def test_a_raising_condition_skips_only_its_rule(self):
+        """TICK-26"""
+        _TickLoopFixture.make_room("Test Room 1")
+        _TickLoopFixture.load_rules([
+            self._basic_rule(rule_id=1, condition="boom"),
+            self._basic_rule(rule_id=2),
+        ])
+        captured = []
+
+        def boom(rule):
+            raise RuntimeError("condition exploded")
+
+        with self._with_conditions({"boom": boom}), mock.patch(
+            "evennia_mob_spawner.runtime.ms_log",
+            new=lambda m, level="INFO": captured.append((m, level)),
+        ):
+            _TickLoopFixture.tick(0)
+
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
+        self.assertTrue(
+            [m for m, lvl in captured if lvl == "ERROR"],
+            f"a raising condition was not logged at ERROR: {captured}",
+        )
 
 
 class _PersistsCheckFixture:
@@ -2433,223 +2703,20 @@ class PersistsAsAttributeTest(TestCase):
     """
 
     def test_declared_attribute_property_returns_true(self):
-        from evennia_mob_spawner.script import _persists_as_attribute
+        from evennia_mob_spawner.runtime import _persists_as_attribute
         obj = _PersistsCheckFixture()
         self.assertTrue(_persists_as_attribute(obj, "real_attr"))
 
     def test_plain_class_attribute_returns_false(self):
-        from evennia_mob_spawner.script import _persists_as_attribute
+        from evennia_mob_spawner.runtime import _persists_as_attribute
         obj = _PersistsCheckFixture()
         self.assertFalse(_persists_as_attribute(obj, "plain_attr"))
 
     def test_undeclared_name_returns_false(self):
         # Not a descriptor, not even a plain attribute — absent entirely.
-        from evennia_mob_spawner.script import _persists_as_attribute
+        from evennia_mob_spawner.runtime import _persists_as_attribute
         obj = _PersistsCheckFixture()
         self.assertFalse(_persists_as_attribute(obj, "does_not_exist_at_all"))
-
-
-class RaceProtocolTest(EvenniaWorldTestCase):
-    """Decision #13's race-safe drain: stop_when_safe + force_stop.
-
-    The tick loop checks ``ndb._stop_requested`` between rules and
-    sets ``ndb._tick_in_progress`` for the duration of a tick.
-    These tests exercise the flag plumbing directly — true
-    mid-tick interruption requires concurrency that's awkward to
-    test deterministically, so we cover the synchronous side: flag
-    set BEFORE the tick blocks the tick; flag clearing on a
-    successful drain; force_stop pauses regardless of flag state.
-    """
-
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
-
-    def _rule(self, rule_id=1):
-        return {
-            "rule_id": rule_id,
-            "typeclass": self.DEFAULT_OBJECT,
-            "key": "a test mob",
-            "area_tag": "test_area",
-            "target": 1,
-            "max_per_room": 1,
-            "respawn_seconds": 0,
-        }
-
-    def _script_with_rule(self):
-        return _TickLoopFixture.deploy_rule(self._rule())
-
-    # at_repeat's flag handling -----------------------------------------
-
-    def test_tick_sets_and_clears_tick_in_progress(self):
-        # Sanity: ``_tick_in_progress`` is False before, True during
-        # (we can't observe the True easily without concurrency), and
-        # False after. The pre/post check is sufficient — if the
-        # finally-block didn't fire, the flag would leak across ticks.
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        self.assertFalse(bool(script.ndb._tick_in_progress))
-        script.at_repeat()
-        self.assertFalse(bool(script.ndb._tick_in_progress))
-
-    def test_tick_exits_early_when_stop_requested_at_start(self):
-        # Set the stop flag before calling at_repeat. The tick should
-        # exit immediately without spawning anything. Deliberately no
-        # room created — the stop check fires BEFORE the rule loop
-        # would have queried for a room.
-        script = self._script_with_rule()
-        script.ndb._stop_requested = True
-        script.at_repeat()
-        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
-        # No state updates either (we never entered the rule loop).
-        self.assertEqual(script.db.last_spawn_times or {}, {})
-
-    def test_tick_exits_early_between_rules_when_stop_requested(self):
-        # Two rules in the table. Manually inject a stop request that
-        # fires for the second rule. Use a wrapped at_repeat that sets
-        # the flag mid-pass by patching _tick_one_rule to set the flag
-        # after processing rule 1.
-        _TickLoopFixture.make_room("Test Room 1")
-        _TickLoopFixture.make_room("Test Room 2")
-
-        rule_1 = self._rule(rule_id=1)
-        rule_2 = self._rule(rule_id=2)
-        from evennia_mob_spawner.deployer import Deployer
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(
-            rule_sets={"twin.yaml": [rule_1, rule_2]},
-        ))
-
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="twin.yaml").first()
-
-        # Wrap _tick_one_rule so that processing rule 1 sets the stop
-        # flag — rule 2's iteration should then bail at the start-of-
-        # iteration check, with no spawn.
-        original = script._tick_one_rule
-
-        def patched(rule, *args, **kwargs):
-            original(rule, *args, **kwargs)
-            if rule["rule_id"] == 1:
-                script.ndb._stop_requested = True
-
-        script._tick_one_rule = patched
-        try:
-            script.at_repeat()
-        finally:
-            script._tick_one_rule = original
-
-        # Exactly one mob should have spawned (rule 1 only).
-        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1)
-
-    # stop_when_safe semantics ------------------------------------------
-
-    def test_stop_when_safe_returns_true_for_idle_script(self):
-        # No tick in flight, script just sitting there → drains
-        # trivially and pauses.
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        drained = script.stop_when_safe(timeout=1.0)
-        self.assertTrue(drained)
-        # Script should now be paused.
-        self.assertTrue(bool(script.db._paused_time))
-
-    def test_stop_when_safe_returns_true_for_already_paused_script(self):
-        # Already paused → return True without touching state.
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        script.pause()
-        # _stop_requested should be untouched by a no-op stop_when_safe.
-        self.assertFalse(bool(script.ndb._stop_requested))
-        drained = script.stop_when_safe(timeout=0.5)
-        self.assertTrue(drained)
-        self.assertFalse(bool(script.ndb._stop_requested))
-
-    def test_stop_when_safe_clears_stop_flag_on_success(self):
-        # After a successful drain the flag is False so the next tick
-        # (after unpause) proceeds normally.
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        script.stop_when_safe(timeout=1.0)
-        self.assertFalse(bool(script.ndb._stop_requested))
-
-    # force_stop semantics ----------------------------------------------
-
-    def test_force_stop_pauses_active_script(self):
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        # Sanity: script starts active.
-        self.assertTrue(script.is_active)
-        self.assertFalse(bool(script.db._paused_time))
-        script.force_stop()
-        self.assertTrue(bool(script.db._paused_time))
-
-    def test_force_stop_sets_stop_flag(self):
-        # force_stop also signals the stop flag — a wedged in-flight
-        # tick that DOES eventually reach its between-rules check will
-        # exit. Deployer is responsible for clearing the flag after
-        # the swap; force_stop itself doesn't.
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        script.force_stop()
-        self.assertTrue(bool(script.ndb._stop_requested))
-
-    def test_force_stop_idempotent_on_already_paused_script(self):
-        # Calling force_stop on a paused script shouldn't unpause it
-        # or cause any error.
-        _TickLoopFixture.make_room("Test Room 1")
-        script = self._script_with_rule()
-        script.pause()
-        script.force_stop()
-        self.assertTrue(bool(script.db._paused_time))
-
-    # Deployer integration ----------------------------------------------
-
-    def test_deployer_resumes_running_script_after_swap(self):
-        # Deploy once (script created + running). Deploy again — the
-        # script should still be running afterward.
-        _TickLoopFixture.make_room("Test Room 1")
-        from evennia_mob_spawner.deployer import Deployer
-        defs = Definitions.from_dict({"levels": []})
-        deployer = Deployer(defs)
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        self.assertTrue(script.is_active)
-        self.assertFalse(bool(script.db._paused_time))
-
-        # Re-deploy — should drain via stop_when_safe (which succeeds
-        # trivially since no tick is in flight) and unpause at the end.
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
-
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        self.assertTrue(script.is_active)
-        self.assertFalse(bool(script.db._paused_time))
-        # Stop flag should have been cleared by the Deployer's finally.
-        self.assertFalse(bool(script.ndb._stop_requested))
-
-    def test_deployer_does_not_resume_paused_script(self):
-        # If a script was paused before re-deploy, it should remain
-        # paused afterward (the user explicitly stopped it; don't
-        # second-guess).
-        _TickLoopFixture.make_room("Test Room 1")
-        from evennia_mob_spawner.deployer import Deployer
-        defs = Definitions.from_dict({"levels": []})
-        deployer = Deployer(defs)
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
-        from evennia_mob_spawner.script import MobSpawnerScript
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        script.pause()
-        self.assertTrue(bool(script.db._paused_time))
-
-        deployer.deploy(LoadResult(rule_sets={"a.yaml": [self._rule()]}))
-
-        script = MobSpawnerScript.objects.filter(db_key="a.yaml").first()
-        # Should still be paused.
-        self.assertTrue(bool(script.db._paused_time))
 
 
 class CliScaffoldSmokeTest(TestCase):
@@ -2723,23 +2790,19 @@ class YamlReaderDependencyTest(TestCase):
         )
 
 
-class SpawnIdentityTagTest(EvenniaWorldTestCase):
+class SpawnIdentityTagTest(SpawnerTestCase):
     """Every spawned mob carries identity tags for rule + source file.
 
-    Stamped by ``_spawn_one`` alongside the existing ``area_tag``:
+    Stamped by ``spawn_one`` alongside the existing ``area_tag``:
       - ``mob_spawner_rule`` category, key = ``str(rule_id)``
-      - ``mob_spawner_file`` category, key = ``script.db_key``
+      - ``mob_spawner_file`` category, key = the rule's file
+      - ``mob_spawner_pack`` category, key = the pack key, for a pack rule
 
     Together they let callers query "every mob from rule X in file Y"
     without relying on (typeclass, area_tag) being a unique discriminator.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _rule(self, rule_id, **overrides):
         rule = {
@@ -2754,12 +2817,12 @@ class SpawnIdentityTagTest(EvenniaWorldTestCase):
         rule.update(overrides)
         return rule
 
-    def _spawned_mob(self, path="identity_test.yaml", rule_id=7):
+    def _spawned_mob(self, path="identity_test.yaml", rule_id=7, **overrides):
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(
-            self._rule(rule_id=rule_id), path=path,
+        state = _TickLoopFixture.deploy_rule(
+            self._rule(rule_id=rule_id, **overrides), path=path,
         )
-        script.at_repeat()
+        _TickLoopFixture.run(state)
         from evennia.objects.models import ObjectDB
         mob = ObjectDB.objects.filter(
             db_typeclass_path=self.DEFAULT_OBJECT,
@@ -2767,7 +2830,7 @@ class SpawnIdentityTagTest(EvenniaWorldTestCase):
             db_tags__db_category="mob_area",
         ).first()
         self.assertIsNotNone(mob, "fixture did not spawn a mob")
-        return mob, script
+        return mob, state
 
     def test_spawned_mob_carries_rule_id_tag(self):
         mob, _ = self._spawned_mob(rule_id=7)
@@ -2777,11 +2840,21 @@ class SpawnIdentityTagTest(EvenniaWorldTestCase):
         self.assertEqual(rule_tags, ["7"])
 
     def test_spawned_mob_carries_file_path_tag(self):
-        mob, script = self._spawned_mob(path="identity_test.yaml")
+        mob, state = self._spawned_mob(path="identity_test.yaml")
         file_tags = mob.tags.get(
             category="mob_spawner_file", return_list=True,
         ) or []
-        self.assertEqual(file_tags, [script.db_key])
+        self.assertEqual(file_tags, [state.file])
+
+    def test_a_pack_rule_stamps_the_pack_tag(self):
+        """SPAWN-21"""
+        from evennia_mob_spawner.config import _PACK_TAG_CATEGORY
+
+        mob, _ = self._spawned_mob(pack="wolves_ne")
+        self.assertEqual(
+            mob.tags.get(category=_PACK_TAG_CATEGORY, return_list=True),
+            ["wolves_ne"],
+        )
 
     def test_spawned_mob_retains_area_tag(self):
         # Identity-tag stamping must not displace area_tag.
@@ -2794,22 +2867,17 @@ class SpawnIdentityTagTest(EvenniaWorldTestCase):
     def test_two_rules_in_same_file_get_distinct_rule_tags(self):
         # Two mobs from the same file but different rule_ids must end
         # up with different rule-id tag values.
-        from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.script import MobSpawnerScript
         from evennia.objects.models import ObjectDB
 
         _TickLoopFixture.make_room("Test Room A", area_tag="area_a")
         _TickLoopFixture.make_room("Test Room B", area_tag="area_b")
 
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={
-            "two_rules.yaml": [
-                self._rule(rule_id=1, area_tag="area_a"),
-                self._rule(rule_id=2, area_tag="area_b"),
-            ],
-        }))
-        script = MobSpawnerScript.objects.filter(db_key="two_rules.yaml").first()
-        script.at_repeat()
+        states = _TickLoopFixture.load_rules([
+            self._rule(rule_id=1, area_tag="area_a"),
+            self._rule(rule_id=2, area_tag="area_b"),
+        ], path="two_rules.yaml")
+        for state in states:
+            _TickLoopFixture.run(state)
 
         mob_a = ObjectDB.objects.filter(
             db_typeclass_path=self.DEFAULT_OBJECT,
@@ -2831,21 +2899,15 @@ class SpawnIdentityTagTest(EvenniaWorldTestCase):
         )
 
 
-class CountLivingContractTest(EvenniaWorldTestCase):
-    """``_count_living`` keys on (file, rule_id), not (typeclass, area_tag).
+class CountLivingContractTest(SpawnerTestCase):
+    """``count_living`` keys on (file, rule_id), not (typeclass, area_tag).
 
-    The contract change enables shared-typeclass loot variants: two
-    rules targeting the same typeclass + area_tag are counted as
-    independent populations, because the identity tags stamped at
-    spawn time differ between them.
+    Two rules targeting the same typeclass + area_tag are counted as
+    independent populations, because the identity tags stamped at spawn
+    time differ between them.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _rule(self, rule_id, **overrides):
         rule = {
@@ -2861,37 +2923,24 @@ class CountLivingContractTest(EvenniaWorldTestCase):
         return rule
 
     def test_two_rules_same_typeclass_and_area_tag_counted_independently(self):
-        # Headline contract test: two rules in one file sharing the
-        # same typeclass + area_tag, distinct rule_ids. Under the old
-        # (typeclass, area_tag) discriminator both rules would see
-        # current=2 after two ticks and one would be "stuck" thinking
-        # the other satisfied its target. The new keying counts them
-        # independently — each rule's _count_living returns just its
-        # own rule's mob.
-        from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.script import MobSpawnerScript
+        # Two rules in one file sharing the same typeclass + area_tag,
+        # distinct rule_ids. Each rule's count_living returns just its own
+        # rule's mob, so neither stalls thinking the other met its target.
+        from evennia_mob_spawner import runtime
 
         _TickLoopFixture.make_room("Room 1")
         _TickLoopFixture.make_room("Room 2")
 
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={
-            "shared.yaml": [self._rule(rule_id=1), self._rule(rule_id=2)],
-        }))
-        script = MobSpawnerScript.objects.filter(db_key="shared.yaml").first()
+        states = _TickLoopFixture.load_rules(
+            [self._rule(rule_id=1), self._rule(rule_id=2)], path="shared.yaml",
+        )
+        for _ in range(2):
+            for state in states:
+                _TickLoopFixture.run(state)
 
-        # Two ticks → each rule fills its target=1 independently
-        # (respawn_seconds=0 means no cooldown between ticks).
-        script.at_repeat()
-        script.at_repeat()
-
-        rule1 = script.db.spawn_table[0]
-        rule2 = script.db.spawn_table[1]
-        self.assertEqual(script._count_living(rule1), 1)
-        self.assertEqual(script._count_living(rule2), 1)
-        # Sanity: two distinct mobs exist in the world. If the old
-        # contract were in force, this would have spawned only one and
-        # the second rule would have stalled at the population gate.
+        self.assertEqual(runtime.count_living(states[0]), 1)
+        self.assertEqual(runtime.count_living(states[1]), 1)
+        # Two distinct mobs exist in the world.
         self.assertEqual(
             _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 2,
         )
@@ -2899,48 +2948,33 @@ class CountLivingContractTest(EvenniaWorldTestCase):
     def test_rule_id_collision_across_files_isolated(self):
         # Two files each with rule_id=1, same typeclass + area_tag.
         # The file tag prevents cross-file bleed in the count.
-        from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.script import MobSpawnerScript
+        from evennia_mob_spawner import runtime
 
         _TickLoopFixture.make_room("Room 1")
 
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={
-            "file_a.yaml": [self._rule(rule_id=1)],
-            "file_b.yaml": [self._rule(rule_id=1)],
-        }))
-        script_a = MobSpawnerScript.objects.filter(db_key="file_a.yaml").first()
-        script_b = MobSpawnerScript.objects.filter(db_key="file_b.yaml").first()
+        state_a = _TickLoopFixture.deploy_rule(self._rule(rule_id=1), path="file_a.yaml")
+        state_b = _TickLoopFixture.deploy_rule(self._rule(rule_id=1), path="file_b.yaml")
 
-        # Only script_a ticks → its rule spawns one mob.
-        script_a.at_repeat()
+        # Only file_a's rule runs → it spawns one mob.
+        _TickLoopFixture.run(state_a)
 
-        rule_a = script_a.db.spawn_table[0]
-        rule_b = script_b.db.spawn_table[0]
-        self.assertEqual(script_a._count_living(rule_a), 1)
-        # script_b's count for ITS rule_id=1 must be 0, not 1 — the
-        # mob_spawner_file tag prevents script_a's mob from bleeding in.
-        self.assertEqual(script_b._count_living(rule_b), 0)
+        self.assertEqual(runtime.count_living(state_a), 1)
+        # file_b's count for ITS rule_id=1 must be 0, not 1 — the
+        # mob_spawner_file tag stops file_a's mob bleeding in.
+        self.assertEqual(runtime.count_living(state_b), 0)
 
     def test_count_excludes_mobs_lacking_identity_tags(self):
         # Manually create a mob with the same typeclass + area_tag as
-        # a deployed rule but WITHOUT the new identity tags. Proves the
-        # count is driven by the identity tags, not by a typeclass +
-        # area_tag fallback.
+        # a deployed rule but WITHOUT the identity tags. Proves the count
+        # is driven by the identity tags, not by a typeclass + area_tag
+        # fallback.
         from evennia.utils.create import create_object
-        from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.script import MobSpawnerScript
+        from evennia_mob_spawner import runtime
 
         room = _TickLoopFixture.make_room("Room 1")
+        state = _TickLoopFixture.deploy_rule(self._rule(rule_id=1))
 
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={
-            "test.yaml": [self._rule(rule_id=1)],
-        }))
-        script = MobSpawnerScript.objects.filter(db_key="test.yaml").first()
-        rule = script.db.spawn_table[0]
-
-        # Create an "interloper" mob bypassing _spawn_one. It carries
+        # Create an "interloper" mob bypassing spawn_one. It carries
         # the same typeclass + area_tag the rule would produce, but
         # lacks the mob_spawner_rule and mob_spawner_file identity tags.
         interloper = create_object(
@@ -2955,25 +2989,20 @@ class CountLivingContractTest(EvenniaWorldTestCase):
             _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1,
         )
 
-        # But the new _count_living must return 0 — no rule produced
-        # the interloper, so it has no identity tags, so it's invisible
-        # to the per-rule count.
-        self.assertEqual(script._count_living(rule), 0)
+        # But count_living must return 0 — no rule produced the
+        # interloper, so it has no identity tags, so it's invisible to
+        # the per-rule count.
+        self.assertEqual(runtime.count_living(state), 0)
 
 
-class YamlDeclaredTagsTest(EvenniaWorldTestCase):
+class YamlDeclaredTagsTest(SpawnerTestCase):
     """The `tags:` rule field stamps additional tags on each spawned mob.
 
     Each entry is a bare string (untyped) or a `{key, category?}` dict.
     Library-stamped tags (area_tag, identity tags) are unaffected.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _rule(self, **overrides):
         rule = {
@@ -2989,12 +3018,11 @@ class YamlDeclaredTagsTest(EvenniaWorldTestCase):
         return rule
 
     def _spawn_mob_with(self, tags):
-        from evennia_mob_spawner.script import MobSpawnerScript
         from evennia.objects.models import ObjectDB
 
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(self._rule(tags=tags))
-        script.at_repeat()
+        state = _TickLoopFixture.deploy_rule(self._rule(tags=tags))
+        _TickLoopFixture.run(state)
         mob = ObjectDB.objects.filter(
             db_typeclass_path=self.DEFAULT_OBJECT,
             db_tags__db_key="test_area",
@@ -3036,12 +3064,11 @@ class YamlDeclaredTagsTest(EvenniaWorldTestCase):
     def test_tags_field_absent_no_extra_tags(self):
         # Without a `tags:` field, the mob carries ONLY the library-stamped
         # tags (area_tag + identity tags) — no extras leak in.
-        from evennia_mob_spawner.script import MobSpawnerScript
         from evennia.objects.models import ObjectDB
 
         _TickLoopFixture.make_room("Test Room 1")
-        script = _TickLoopFixture.deploy_rule(self._rule())  # no tags key
-        script.at_repeat()
+        state = _TickLoopFixture.deploy_rule(self._rule())  # no tags key
+        _TickLoopFixture.run(state)
         mob = ObjectDB.objects.filter(
             db_typeclass_path=self.DEFAULT_OBJECT,
             db_tags__db_key="test_area",
@@ -3063,22 +3090,15 @@ class YamlDeclaredTagsTest(EvenniaWorldTestCase):
         self.assertEqual(untyped, [])
 
 
-class RoomHasSpaceContractTest(EvenniaWorldTestCase):
-    """``_room_has_space`` keys on (file, rule_id), not (typeclass, area_tag).
+class RoomHasSpaceContractTest(SpawnerTestCase):
+    """``room_has_space`` keys on (file, rule_id), not (typeclass, area_tag).
 
-    The contract change makes the per-room ``max_per_room`` cap truly
-    per-rule. Two rules sharing typeclass + area_tag enforce their caps
-    independently — a room can hold one mob from each rule rather than
-    one mob TOTAL across both. Completes the contract migration started
-    with ``_count_living``.
+    The per-room ``max_per_room`` cap is per-rule. Two rules sharing
+    typeclass + area_tag enforce their caps independently — a room can
+    hold one mob from each rule rather than one mob TOTAL across both.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _rule(self, rule_id, **overrides):
         rule = {
@@ -3095,30 +3115,22 @@ class RoomHasSpaceContractTest(EvenniaWorldTestCase):
 
     def test_two_rules_share_typeclass_and_area_tag_but_max_per_room_is_independent(self):
         # Two rules in one file sharing typeclass + area_tag, each with
-        # max_per_room=1. One shared room. Under the old (typeclass,
-        # area_tag) discriminator the second rule would see the first
-        # rule's mob and skip ("room full"). Under the new (file,
-        # rule_id) discriminator each rule's cap is enforced against
-        # only its own mobs, so both spawn into the same room.
-        from evennia_mob_spawner.deployer import Deployer
-        from evennia_mob_spawner.script import MobSpawnerScript
+        # max_per_room=1. One shared room. Each rule's cap is enforced
+        # against only its own mobs, so both spawn into the same room.
+        from evennia_mob_spawner import runtime
 
         _TickLoopFixture.make_room("Shared Room")
 
-        defs = Definitions.from_dict({"levels": []})
-        Deployer(defs).deploy(LoadResult(rule_sets={
-            "shared.yaml": [self._rule(rule_id=1), self._rule(rule_id=2)],
-        }))
-        script = MobSpawnerScript.objects.filter(db_key="shared.yaml").first()
+        states = _TickLoopFixture.load_rules(
+            [self._rule(rule_id=1), self._rule(rule_id=2)], path="shared.yaml",
+        )
+        for _ in range(2):
+            for state in states:
+                _TickLoopFixture.run(state)
 
-        script.at_repeat()
-        script.at_repeat()
-
-        rule1 = script.db.spawn_table[0]
-        rule2 = script.db.spawn_table[1]
         # Each rule should have hit its target (1 mob).
-        self.assertEqual(script._count_living(rule1), 1)
-        self.assertEqual(script._count_living(rule2), 1)
+        self.assertEqual(runtime.count_living(states[0]), 1)
+        self.assertEqual(runtime.count_living(states[1]), 1)
         # Two mobs total in the room — confirms the per-room cap
         # was enforced per-rule, not as a shared pool.
         self.assertEqual(
@@ -3126,19 +3138,15 @@ class RoomHasSpaceContractTest(EvenniaWorldTestCase):
         )
 
     def test_max_per_room_still_blocks_within_a_single_rule(self):
-        # Defensive: the change is about *which* mobs count, not about
-        # removing the cap. One rule, target=3, max_per_room=1, one
-        # room — only one mob should ever exist there.
-        from evennia_mob_spawner.script import MobSpawnerScript
-
+        # One rule, target=3, max_per_room=1, one room — only one mob
+        # should ever exist there.
         _TickLoopFixture.make_room("Only Room")
-        script = _TickLoopFixture.deploy_rule(
+        state = _TickLoopFixture.deploy_rule(
             self._rule(rule_id=1, target=3, max_per_room=1),
         )
 
-        script.at_repeat()
-        script.at_repeat()
-        script.at_repeat()
+        for _ in range(3):
+            _TickLoopFixture.run(state)
 
         self.assertEqual(
             _TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 1,
@@ -3147,35 +3155,7 @@ class RoomHasSpaceContractTest(EvenniaWorldTestCase):
 
 
 class CommandScopeGateTest(TestCase):
-    """Which gate each command carries, and why it carries it."""
-
-    def _cmds(self):
-        from evennia_mob_spawner.commands import (
-            CmdMsDelete,
-            CmdMsRestart,
-            CmdMsStatus,
-            CmdMsStop,
-        )
-        return CmdMsStop, CmdMsDelete, CmdMsRestart, CmdMsStatus
-
-    def test_commands_touching_the_live_task_are_shard_scoped(self):
-        # pause() and delete() both reach for ndb._task, which exists only
-        # in the process running the script — so a broad scope would act on
-        # this instance's share while reporting a clean sweep of all of them.
-        # ms_status only reads that task, but reading it off-process would
-        # report every foreign script as stalled, so it carries the gate too.
-        for cmd in self._cmds():
-            self.assertTrue(cmd.shard_scoped, f"{cmd.key} should be shard-scoped")
-
-    def test_the_census_raises_not_implemented(self):
-        # Gutted deliberately. Under scaling each instance holds its own
-        # database, so a whole-world census has no process that can answer
-        # it. What the command should become is open, and a report that
-        # quietly answered for one instance would read as the whole world.
-        from evennia_mob_spawner.commands import CmdMsSpawnReport
-
-        with self.assertRaises(NotImplementedError):
-            CmdMsSpawnReport().func()
+    """How the shared scope gate words its refusals."""
 
     def test_refusal_names_the_invoking_command(self):
         # The gate is shared, so its messages must not hardcode ms_load.
@@ -3198,321 +3178,8 @@ class CommandScopeGateTest(TestCase):
             self.assertIn("ms_load", check_shard_scope({}))
 
 
-class StalledScriptTest(EvenniaWorldTestCase):
-    """A script marked active but carrying no live tick.
-
-    Evennia writes the pause marker only when a task exists
-    (``_pause_task``), so a task lost any other way leaves ``is_active``
-    True and ``_paused_time`` unset. Everything gated on that marker —
-    the boot walk, ``pause()``, ``unpause()`` — then does nothing, which
-    is a state ``ms_stop`` must not report success against.
-    """
-
-    def _script(self):
-        return _TickLoopFixture.deploy_rule(dict(_VALID_RULE))
-
-    @staticmethod
-    def _stall(script):
-        """Put ``script`` in the state: active, unpaused, no task."""
-        script.ndb._task = None
-        script.db._paused_time = None
-        return script
-
-    def _stop(self, script):
-        from evennia_mob_spawner.commands import CmdMsStop
-        messages = []
-        CmdMsStop().apply(script, messages)
-        return messages
-
-    # -- detection ---------------------------------------------------
-
-    def test_active_without_a_task_is_stalled(self):
-        self.assertTrue(_is_stalled(self._stall(self._script())))
-
-    def test_active_with_a_task_is_not_stalled(self):
-        script = self._script()
-        script.start()
-        self.assertFalse(_is_stalled(script))
-
-    def test_paused_script_is_not_stalled(self):
-        # A paused script has a marker, so the recovery paths work on it.
-        script = self._stall(self._script())
-        script.db._paused_time = 5
-        self.assertFalse(_is_stalled(script))
-
-    def test_stopped_script_is_not_stalled(self):
-        script = self._stall(self._script())
-        script.db_is_active = False
-        self.assertFalse(_is_stalled(script))
-
-    # -- ms_stop -----------------------------------------------------
-
-    def test_ms_stop_reports_the_stall_rather_than_success(self):
-        script = self._stall(self._script())
-        message = " ".join(self._stop(script))
-        self.assertIn("not ticking", message)
-        self.assertIn("ms_restart", message)
-
-    def test_ms_stop_leaves_a_stalled_script_untouched(self):
-        # pause() cannot write the marker without a task, so calling it
-        # would only produce a "paused" log line that never happened.
-        script = self._stall(self._script())
-        self._stop(script)
-        self.assertIsNone(script.db._paused_time)
-        self.assertTrue(script.is_active)
-
-    def test_ms_stop_still_pauses_a_running_script(self):
-        script = self._script()
-        script.start()
-        message = " ".join(self._stop(script))
-        self.assertIn("stopped", message)
-        self.assertIsNotNone(script.db._paused_time)
-
-    # -- ms_restart --------------------------------------------------
-
-    def _restart(self, script):
-        from evennia_mob_spawner.commands import CmdMsRestart
-        messages = []
-        CmdMsRestart().apply(script, messages)
-        return messages
-
-    def test_ms_restart_recovers_a_stalled_script(self):
-        script = self._stall(self._script())
-        message = " ".join(self._restart(script))
-        self.assertIn("was stalled", message)
-        self.assertIsNotNone(script.ndb._task)
-
-    def test_ms_restart_names_the_stall_apart_from_a_stop(self):
-        # The two reach start() by different routes; the log has to tell
-        # them apart or a recurring stall reads as an operator stopping it.
-        script = self._stall(self._script())
-        self.assertNotIn("was stopped", " ".join(self._restart(script)))
-
-    def test_ms_restart_leaves_a_running_script_alone(self):
-        script = self._script()
-        script.start()
-        self.assertIn("already active", " ".join(self._restart(script)))
-
-    def test_ms_restart_still_unpauses_a_paused_script(self):
-        script = self._script()
-        script.start()
-        script.pause()
-        message = " ".join(self._restart(script))
-        self.assertIn("was paused", message)
-        self.assertIsNone(script.db._paused_time)
-
-    def test_ms_restart_reports_a_start_that_did_not_take(self):
-        script = self._stall(self._script())
-        with mock.patch.object(script, "start"):
-            message = " ".join(self._restart(script))
-        self.assertIn("no tick attached", message)
-
-    def test_ms_restart_says_nothing_extra_when_the_tick_attaches(self):
-        # The check is there to catch a failure, not to narrate a success.
-        script = self._stall(self._script())
-        self.assertNotIn("no tick attached", " ".join(self._restart(script)))
-
-    def test_ms_restart_still_starts_a_stopped_script(self):
-        script = self._script()
-        script.stop()
-        message = " ".join(self._restart(script))
-        self.assertIn("was stopped", message)
-        self.assertIsNotNone(script.ndb._task)
-
-    def test_ms_restart_reports_an_unpause_that_did_not_take(self):
-        # The check guards every route to a restart, not only the stalled
-        # one — unpause() has its own ways of silently doing nothing.
-        script = self._script()
-        script.start()
-        script.pause()
-        with mock.patch.object(script, "unpause"):
-            message = " ".join(self._restart(script))
-        self.assertIn("no tick attached", message)
-
-    # -- the states ms_stop must leave alone -------------------------
-
-    def test_ms_stop_reports_a_paused_script_unchanged(self):
-        script = self._script()
-        script.start()
-        script.pause()
-        self.assertIn("already paused", " ".join(self._stop(script)))
-
-    def test_ms_stop_reports_a_stopped_script_unchanged(self):
-        script = self._script()
-        script.stop()
-        self.assertIn("already stopped", " ".join(self._stop(script)))
-
-    # -- the log line that makes a recurrence visible ----------------
-
-    def _levels_logged(self, run, script):
-        with mock.patch("evennia_mob_spawner.commands.ms_log") as logged:
-            run(script)
-        return [call.kwargs.get("level") for call in logged.call_args_list]
-
-    def test_ms_stop_logs_the_stall_at_warn(self):
-        script = self._stall(self._script())
-        self.assertIn("WARN", self._levels_logged(self._stop, script))
-
-    def test_ms_restart_logs_the_stall_at_warn(self):
-        script = self._stall(self._script())
-        self.assertIn("WARN", self._levels_logged(self._restart, script))
-
-    def test_a_normal_stop_is_not_logged_at_warn(self):
-        script = self._script()
-        script.start()
-        self.assertNotIn("WARN", self._levels_logged(self._stop, script))
-
-    # -- ms_status ---------------------------------------------------
-
-    def _status(self, script):
-        from evennia_mob_spawner.commands import CmdMsStatus
-        messages = []
-        CmdMsStatus().apply(script, messages)
-        return " ".join(messages)
-
-    def test_ms_status_names_a_stalled_script(self):
-        script = self._stall(self._script())
-        self.assertIn("stalled", self._status(script))
-
-    def test_ms_status_gives_a_stalled_script_no_next_tick(self):
-        # The absent next= was the only tell before; it must not be the
-        # only tell now, but it must still not claim a tick is coming.
-        script = self._stall(self._script())
-        self.assertNotIn("next=", self._status(script))
-
-    def test_ms_status_reports_a_ticking_script_as_active(self):
-        script = self._script()
-        script.start()
-        line = self._status(script)
-        self.assertIn("active", line)
-        self.assertNotIn("stalled", line)
-        self.assertIn("next=", line)
-
-    def test_ms_status_reports_a_paused_script_as_paused(self):
-        script = self._script()
-        script.start()
-        script.pause()
-        line = self._status(script)
-        self.assertIn("paused", line)
-        self.assertNotIn("stalled", line)
-
-    def test_ms_status_reports_a_stopped_script_as_stopped(self):
-        script = self._script()
-        script.stop()
-        line = self._status(script)
-        self.assertIn("stopped", line)
-        self.assertNotIn("stalled", line)
-
-    # -- colour ------------------------------------------------------
-
-    def test_a_stalled_script_reads_red(self):
-        self.assertIn("|rstalled|n", self._status(self._stall(self._script())))
-
-    def test_a_ticking_script_reads_green(self):
-        script = self._script()
-        script.start()
-        self.assertIn("|gactive|n", self._status(script))
-
-    def test_a_paused_script_reads_yellow(self):
-        script = self._script()
-        script.start()
-        script.pause()
-        self.assertIn("|ypaused|n", self._status(script))
-
-    def test_only_the_state_word_is_coloured(self):
-        # The operator is scanning for the odd one out, not reading prose.
-        line = self._status(self._stall(self._script()))
-        self.assertNotIn("|r", line.split("stalled|n")[1])
-
-
-class MsLoadStallGateTest(EvenniaWorldTestCase):
-    """``ms_load`` refuses to deploy onto a script that is not ticking.
-
-    Deploying onto a stalled script swaps its rules and reports a clean
-    deploy while the script stays dead. Refusing sends the operator to
-    ``ms_restart`` and keeps ``ms_load`` doing the one job it names.
-    """
-
-    MILLHOLM = "shard0/millholm.yaml"
-    WILDERNESS = "shard0/wilderness.yaml"
-
-    def _script(self, path, *, stalled=False):
-        script = _TickLoopFixture.deploy_rule(dict(_VALID_RULE), path=path)
-        if stalled:
-            script.ndb._task = None
-            script.db._paused_time = None
-        else:
-            script.start()
-        return script
-
-    def _check(self, query):
-        return check_scope_not_stalled(
-            query,
-            FixtureReader(SCAFFOLD),
-            Definitions.from_dict({"levels": ["shard", "zone"]}),
-        )
-
-    # -- when it stays out of the way --------------------------------
-
-    def test_a_healthy_scope_is_not_refused(self):
-        self._script(self.MILLHOLM)
-        self.assertIsNone(self._check({"shard": "shard0"}))
-
-    def test_a_scope_with_no_scripts_yet_is_not_refused(self):
-        # First-ever deploy of a file: nothing exists to be stalled.
-        self.assertIsNone(self._check({"shard": "shard0"}))
-
-    def test_a_stall_outside_the_scope_is_not_refused(self):
-        self._script(self.WILDERNESS, stalled=True)
-        self.assertIsNone(
-            self._check({"shard": "shard0", "zone": "millholm"})
-        )
-
-    # -- when it refuses ---------------------------------------------
-
-    def test_a_stalled_script_refuses_the_load(self):
-        self._script(self.MILLHOLM, stalled=True)
-        refusal = self._check({"shard": "shard0", "zone": "millholm"})
-        self.assertIn("stalled", refusal)
-        self.assertIn(self.MILLHOLM, refusal)
-
-    def test_every_stalled_script_is_named(self):
-        # One ms_restart over the same scope should clear the lot, so the
-        # operator needs the full list, not the first one hit.
-        self._script(self.MILLHOLM, stalled=True)
-        self._script(self.WILDERNESS, stalled=True)
-        refusal = self._check({"shard": "shard0"})
-        self.assertIn(self.MILLHOLM, refusal)
-        self.assertIn(self.WILDERNESS, refusal)
-
-    def test_one_stalled_script_blocks_the_whole_scope(self):
-        # All-or-nothing: a partial deploy reported as complete is the
-        # failure this guard exists to prevent.
-        self._script(self.MILLHOLM, stalled=True)
-        self._script(self.WILDERNESS)
-        refusal = self._check({"shard": "shard0"})
-        self.assertIsNotNone(refusal)
-        self.assertIn(self.MILLHOLM, refusal)
-        self.assertNotIn(self.WILDERNESS, refusal)
-
-    # -- what it tells the operator to do ----------------------------
-
-    def test_refusal_points_at_ms_restart_over_the_same_scope(self):
-        self._script(self.MILLHOLM, stalled=True)
-        refusal = self._check({"shard": "shard0", "zone": "millholm"})
-        self.assertIn("ms_restart shard=shard0 zone=millholm", refusal)
-
-    def test_refusal_on_a_whole_repo_scope_points_at_restart_all(self):
-        self._script(self.MILLHOLM, stalled=True)
-        self.assertIn("ms_restart all", self._check({}))
-
-    def test_refusal_names_ms_load_as_the_command_to_re_run(self):
-        self._script(self.MILLHOLM, stalled=True)
-        self.assertIn("re-run ms_load", self._check({"shard": "shard0"}))
-
-
-class SpawnRollbackTest(EvenniaWorldTestCase):
-    """``_spawn_one`` is all-or-nothing from creation through attrs.
+class SpawnRollbackTest(SpawnerTestCase):
+    """``spawn_one`` is all-or-nothing from creation through attrs.
 
     ``create_object()`` commits the mob before any tag is stamped, and the
     caller catches per-rule and carries on (decision #14). Without a
@@ -3522,12 +3189,7 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
     replaced. Orphans accumulate silently for the life of the database.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _rule(self):
         return {
@@ -3545,19 +3207,21 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
         return list(ObjectDB.objects.filter(db_key=key))
 
     def _spawn_with_failure_at(self, patch_target, rule=None):
-        """Run one spawn with *patch_target* raising, return the script."""
+        """Run one spawn with *patch_target* raising, return the state."""
+        from evennia_mob_spawner import runtime
+
         rule = rule or self._rule()
         room = _TickLoopFixture.make_room("Rollback Room")
-        script = _TickLoopFixture.deploy_rule(rule)
+        state = _TickLoopFixture.deploy_rule(rule)
         with mock.patch(patch_target, side_effect=RuntimeError("boom")):
             with self.assertRaises(RuntimeError):
-                script._spawn_one(rule, room)
-        return script
+                runtime.spawn_one(state, room)
+        return state
 
     def test_tagging_failure_leaves_no_mob_behind(self):
         """The orphan case: exception while stamping identity tags."""
         self._spawn_with_failure_at(
-            "evennia_mob_spawner.script.get_area_tag_category"
+            "evennia_mob_spawner.runtime.get_area_tag_category"
         )
         self.assertEqual(
             self._objects_named("a test mob"), [],
@@ -3572,7 +3236,7 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
         """
         rule = dict(self._rule(), attrs={"some_value": 3})
         self._spawn_with_failure_at(
-            "evennia_mob_spawner.script._persists_as_attribute", rule=rule
+            "evennia_mob_spawner.runtime._persists_as_attribute", rule=rule
         )
         self.assertEqual(
             self._objects_named("a test mob"), [],
@@ -3581,9 +3245,11 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
 
     def test_successful_spawn_still_produces_a_tagged_mob(self):
         """Control — the rollback must not fire on the happy path."""
+        from evennia_mob_spawner import runtime
+
         room = _TickLoopFixture.make_room("Happy Room")
-        script = _TickLoopFixture.deploy_rule(self._rule())
-        mob = script._spawn_one(self._rule(), room)
+        state = _TickLoopFixture.deploy_rule(self._rule())
+        mob = runtime.spawn_one(state, room)
         self.assertEqual(len(self._objects_named("a test mob")), 1)
         self.assertTrue(mob.tags.get("test_area", category="mob_area"))
 
@@ -3594,22 +3260,24 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
         exactly what the rollback exists to prevent. Logging it at ERROR
         is what stops it being silent as well as invisible.
         """
+        from evennia_mob_spawner import runtime
+
         room = _TickLoopFixture.make_room("Doomed Room")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        state = _TickLoopFixture.deploy_rule(self._rule())
         captured = []
 
         with mock.patch(
-            "evennia_mob_spawner.script.ms_log",
+            "evennia_mob_spawner.runtime.ms_log",
             new=lambda m, level="INFO": captured.append((m, level)),
         ), mock.patch(
-            "evennia_mob_spawner.script.get_area_tag_category",
+            "evennia_mob_spawner.runtime.get_area_tag_category",
             side_effect=RuntimeError("boom"),
         ), mock.patch(
             "evennia.objects.objects.DefaultObject.delete",
             side_effect=RuntimeError("delete failed too"),
         ):
             with self.assertRaises(RuntimeError):
-                script._spawn_one(self._rule(), room)
+                runtime.spawn_one(state, room)
 
         errors = [m for m, lvl in captured if lvl == "ERROR"]
         self.assertTrue(
@@ -3619,132 +3287,171 @@ class SpawnRollbackTest(EvenniaWorldTestCase):
 
     def test_failure_is_reraised_so_the_caller_still_logs_it(self):
         """Rollback must not swallow the error the caller reports on."""
+        from evennia_mob_spawner import runtime
+
         room = _TickLoopFixture.make_room("Reraise Room")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        state = _TickLoopFixture.deploy_rule(self._rule())
         with mock.patch(
-            "evennia_mob_spawner.script.get_area_tag_category",
+            "evennia_mob_spawner.runtime.get_area_tag_category",
             side_effect=RuntimeError("boom"),
         ):
             with self.assertRaises(RuntimeError):
-                script._spawn_one(self._rule(), room)
+                runtime.spawn_one(state, room)
 
 
-class PickRoomTest(EvenniaWorldTestCase):
-    """``_pick_room``'s three-tier fallback (decision #22).
+class PickRoomTest(SpawnerTestCase):
+    """``pick_room``: pack first, then the area pool.
 
-    Pack -> den -> random, using the first step that yields a room with
-    space. The den and random steps are reached through ``TickLoopTest``;
-    this class covers the pack step and every fall-through edge between
-    them, which the tick tests never reach.
-
-    Each test calls ``_pick_room`` directly — the tick loop would gate on
-    cooldown and target first, and the question here is only which room
+    Every step skips a room at ``max_per_room`` or holding anything with a
+    session. Each test calls ``pick_room`` directly — the pass would gate
+    on cooldown and target first, and the question here is only which room
     comes back.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-    LEADER_TYPECLASS = "evennia.objects.objects.DefaultCharacter"
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
-
-    def _rule(self, **overrides):
+    def _rule(self, rule_id=1, **overrides):
         rule = {
-            "rule_id": 1,
+            "rule_id": rule_id,
             "typeclass": self.DEFAULT_OBJECT,
             "key": "a test mob",
             "area_tag": "test_area",
-            "target": 1,
+            "target": 3,
             "max_per_room": 1,
             "respawn_seconds": 0,
         }
         rule.update(overrides)
         return rule
 
-    def _leader_in(self, room, *, area_tag="test_area"):
-        """A living leader of LEADER_TYPECLASS, tagged into the area."""
-        from evennia.utils.create import create_object
-        leader = create_object(
-            self.LEADER_TYPECLASS, key="the pack leader", location=room,
-        )
-        if area_tag:
-            leader.tags.add(area_tag, category="mob_area")
-        return leader
-
-    def _untagged_room(self, key):
+    @staticmethod
+    def _untagged_room(key):
         """A room outside the rule's area pool.
 
-        Step 3 can never return this room, so a result of this room proves
-        step 1 fired rather than the random fallback happening to agree.
+        The pool can never return this room, so a result of this room proves
+        the pack step fired rather than the pool happening to agree.
         """
         from evennia import DefaultRoom
         from evennia.utils.create import create_object
         return create_object(DefaultRoom, key=key)
 
-    def test_pack_step_returns_the_leaders_room(self):
-        # PICK-01.
+    def _pick(self, state, times=10):
+        """Every distinct room ``pick_room`` returns over several calls.
+
+        Selection is random within a step, so one call can agree with the
+        expected room by chance.
+        """
+        from evennia_mob_spawner import runtime
+        return {runtime.pick_room(state) for _ in range(times)}
+
+    # -- the pack step -----------------------------------------------
+
+    def test_a_pack_member_draws_the_spawn_to_its_room(self):
+        """PICK-10"""
+        from evennia_mob_spawner import runtime
+
         _TickLoopFixture.make_room("Area Room")
-        lair = self._untagged_room("Leader's Room")
-        self._leader_in(lair)
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        lair = self._untagged_room("The Lair")
+        state = _TickLoopFixture.deploy_rule(self._rule(pack="wolves", max_per_room=4))
+        runtime.spawn_one(state, lair)          # an existing member
 
-        picked = script._pick_room(
-            self._rule(spawn_with_typeclass=self.LEADER_TYPECLASS)
-        )
-        self.assertEqual(picked, lair)
+        self.assertEqual(self._pick(state), {lair})
 
-    def test_no_living_leader_falls_through(self):
-        # PICK-02. Nothing of the leader typeclass exists at all.
-        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+    def test_any_rule_sharing_the_pack_key_counts(self):
+        """PICK-11"""
+        from evennia_mob_spawner import runtime
 
-        picked = script._pick_room(self._rule(
-            spawn_with_typeclass=self.LEADER_TYPECLASS,
-            den_room_tag="test_den",
-        ))
-        self.assertEqual(picked, den)
+        _TickLoopFixture.make_room("Area Room")
+        lair = self._untagged_room("The Lair")
+        # Rule 1 is the leader and has none alive; rule 2's member does.
+        leader, member, newcomer = _TickLoopFixture.load_rules([
+            self._rule(rule_id=1, pack="wolves"),
+            self._rule(rule_id=2, pack="wolves"),
+            self._rule(rule_id=3, pack="wolves"),
+        ])
+        runtime.spawn_one(member, lair)
 
-    def test_leader_room_at_max_per_room_falls_through(self):
-        # PICK-03. A leader is found, but its room has no space for this
-        # rule — the pack step must not return a full room.
-        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
-        lair = self._untagged_room("Leader's Room")
-        self._leader_in(lair)
-        rule = self._rule(
-            spawn_with_typeclass=self.LEADER_TYPECLASS,
-            den_room_tag="test_den",
-            max_per_room=1,
-        )
-        script = _TickLoopFixture.deploy_rule(rule)
-        script._spawn_one(rule, lair)           # fills the leader's room
+        self.assertEqual(self._pick(newcomer), {lair})
 
-        self.assertEqual(script._pick_room(rule), den)
+    def test_a_pack_member_outside_the_area_is_not_chosen(self):
+        """PICK-12"""
+        from evennia_mob_spawner import runtime
 
-    def test_leader_outside_the_area_tag_is_not_chosen(self):
-        # PICK-04. The pack query is scoped to the rule's area — a leader
-        # of the right typeclass in another area is a different pack.
-        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
+        area_room = _TickLoopFixture.make_room("Area Room")
         elsewhere = self._untagged_room("Another Area")
-        self._leader_in(elsewhere, area_tag="some_other_area")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        stray, newcomer = _TickLoopFixture.load_rules([
+            self._rule(rule_id=1, pack="wolves", area_tag="other_area"),
+            self._rule(rule_id=2, pack="wolves"),
+        ])
+        runtime.spawn_one(stray, elsewhere)
 
-        picked = script._pick_room(self._rule(
-            spawn_with_typeclass=self.LEADER_TYPECLASS,
-            den_room_tag="test_den",
-        ))
-        self.assertEqual(picked, den)
+        self.assertEqual(self._pick(newcomer), {area_room})
 
-    def test_full_den_falls_through_to_the_area_pool(self):
-        # PICK-06. The den is a preference, not a cap on the rule.
-        den = _TickLoopFixture.make_room("Den Room", extra_tag="test_den")
-        spare = _TickLoopFixture.make_room("Spare Room")
-        rule = self._rule(den_room_tag="test_den", max_per_room=1)
-        script = _TickLoopFixture.deploy_rule(rule)
-        script._spawn_one(rule, den)            # fills the den
+    def test_no_living_member_uses_the_area_pool(self):
+        """PICK-13"""
+        area_room = _TickLoopFixture.make_room("Area Room")
+        state = _TickLoopFixture.deploy_rule(self._rule(pack="wolves"))
 
-        self.assertEqual(script._pick_room(rule), spare)
+        self.assertEqual(self._pick(state), {area_room})
+
+    def test_a_blocked_member_room_uses_the_area_pool(self):
+        """PICK-14"""
+        from evennia_mob_spawner import runtime
+
+        area_room = _TickLoopFixture.make_room("Area Room")
+        lair = self._untagged_room("The Lair")
+        state = _TickLoopFixture.deploy_rule(self._rule(pack="wolves", max_per_room=1))
+        runtime.spawn_one(state, lair)          # a member, and the room is full
+
+        self.assertEqual(self._pick(state), {area_room})
+
+        # Room for more, but a player is standing in it.
+        state.rule["max_per_room"] = 4
+        _sessioned(lair)
+        self.assertEqual(self._pick(state), {area_room})
+
+    # -- occupancy ---------------------------------------------------
+
+    def test_a_room_with_a_session_is_never_chosen(self):
+        """PICK-15"""
+        occupied = _TickLoopFixture.make_room("Occupied Room")
+        free = _TickLoopFixture.make_room("Free Room")
+        _sessioned(occupied)
+        state = _TickLoopFixture.deploy_rule(self._rule())
+
+        self.assertEqual(self._pick(state), {free})
+
+    def test_objects_without_a_session_do_not_block(self):
+        """PICK-16"""
+        from evennia import DefaultCharacter
+        from evennia.utils.create import create_object
+        from evennia_mob_spawner import runtime
+
+        room = _TickLoopFixture.make_room("Busy Room")
+        create_object(DefaultCharacter, key="a disconnected player", location=room)
+        other = _TickLoopFixture.deploy_rule(self._rule(rule_id=1), path="other.yaml")
+        runtime.spawn_one(other, room)          # a mob from another rule
+        state = _TickLoopFixture.deploy_rule(self._rule(rule_id=2))
+
+        self.assertEqual(self._pick(state), {room})
+
+    def test_every_room_occupied_returns_none_quietly(self):
+        """PICK-17"""
+        from evennia_mob_spawner import runtime
+
+        _sessioned(_TickLoopFixture.make_room("Room 1"))
+        _sessioned(_TickLoopFixture.make_room("Room 2"))
+        state = _TickLoopFixture.deploy_rule(self._rule())
+
+        self.assertIsNone(runtime.pick_room(state))
+
+        captured = []
+        with mock.patch(
+            "evennia_mob_spawner.runtime.ms_log",
+            new=lambda m, level="INFO": captured.append((m, level)),
+        ):
+            _TickLoopFixture.run(state)
+        self.assertEqual([m for m, lvl in captured if lvl == "WARN"], [])
+        self.assertEqual(_TickLoopFixture.count_mobs(self.DEFAULT_OBJECT), 0)
 
 
 class _HookMob:
@@ -3762,7 +3469,7 @@ class _HookMob:
         self.calls += 1
 
 
-class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
+class MsAtPostSpawnInvocationTest(SpawnerTestCase):
     """Decision #23's runtime half — the library actually calling the hook.
 
     Tier 3 validates that a declared ``ms_at_post_spawn`` is callable with
@@ -3770,12 +3477,7 @@ class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
     itself, the silence when it is absent, and what happens when it raises.
     """
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
     def _rule(self, **overrides):
         rule = {
@@ -3792,8 +3494,10 @@ class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
 
     def test_a_declared_hook_is_invoked_after_spawn(self):
         # SPAWN-18.
+        from evennia_mob_spawner import runtime
+
         room = _TickLoopFixture.make_room("Hook Room")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        state = _TickLoopFixture.deploy_rule(self._rule())
         hook = _HookMob()
 
         # The hook is looked up on the spawned mob, so it goes on the
@@ -3801,7 +3505,7 @@ class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
         with mock.patch(
             f"{self.DEFAULT_OBJECT}.ms_at_post_spawn", hook, create=True,
         ):
-            mob = script._spawn_one(self._rule(), room)
+            mob = runtime.spawn_one(state, room)
 
         self.assertEqual(hook.calls, 1)
         # The hook runs after the mob is fully built: its identity tags
@@ -3810,15 +3514,17 @@ class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
 
     def test_a_typeclass_without_the_hook_is_never_touched(self):
         # SPAWN-19. The protocol is opt-in; absence is silent, not an error.
+        from evennia_mob_spawner import runtime
+
         room = _TickLoopFixture.make_room("Quiet Room")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        state = _TickLoopFixture.deploy_rule(self._rule())
         captured = []
 
         with mock.patch(
-            "evennia_mob_spawner.script.ms_log",
+            "evennia_mob_spawner.runtime.ms_log",
             new=lambda m, level="INFO": captured.append((m, level)),
         ):
-            mob = script._spawn_one(self._rule(), room)
+            mob = runtime.spawn_one(state, room)
 
         self.assertFalse(hasattr(mob, "ms_at_post_spawn"))
         self.assertEqual(
@@ -3829,20 +3535,22 @@ class MsAtPostSpawnInvocationTest(EvenniaWorldTestCase):
         # SPAWN-20. The mob is fully built and tagged before the hook runs,
         # so a consumer bug in the hook must not roll it back — that would
         # leave the population permanently short with no mob to show for it.
+        from evennia_mob_spawner import runtime
+
         room = _TickLoopFixture.make_room("Angry Room")
-        script = _TickLoopFixture.deploy_rule(self._rule())
+        state = _TickLoopFixture.deploy_rule(self._rule())
         captured = []
 
         def boom(self):
             raise RuntimeError("hook exploded")
 
         with mock.patch(
-            "evennia_mob_spawner.script.ms_log",
+            "evennia_mob_spawner.runtime.ms_log",
             new=lambda m, level="INFO": captured.append((m, level)),
         ), mock.patch(
             f"{self.DEFAULT_OBJECT}.ms_at_post_spawn", boom, create=True,
         ):
-            mob = script._spawn_one(self._rule(), room)
+            mob = runtime.spawn_one(state, room)
 
         self.assertIsNotNone(mob.pk, "a hook failure deleted the mob")
         errors = [m for m, lvl in captured if lvl == "ERROR"]
@@ -3907,45 +3615,284 @@ class ParseArgsTest(TestCase):
             self.parse("shard=")
 
 
-class OperateCommandBehaviourTest(EvenniaWorldTestCase):
-    """What ``ms_delete`` and ``ms_spawn_report`` actually do.
+class OperatingCommandTest(SpawnerTestCase):
+    """``ms_status``, ``ms_start`` / ``ms_stop`` and ``ms_delete``."""
 
-    Both are covered elsewhere only for which shard gate they carry
-    (``SHARD-24``..``SHARD-26``). These exercise the ``apply`` body — the
-    part an operator sees.
-    """
+    DEFAULT_OBJECT = DEFAULT_OBJECT
 
-    DEFAULT_OBJECT = "evennia.objects.objects.DefaultObject"
-
-    def tearDown(self):
-        from evennia_mob_spawner.script import MobSpawnerScript
-        for s in MobSpawnerScript.objects.all():
-            s.delete()
-
-    def _rule(self, **overrides):
+    def _rule(self, rule_id=1, **overrides):
         rule = {
-            "rule_id": 1,
+            "rule_id": rule_id,
             "typeclass": self.DEFAULT_OBJECT,
             "key": "a test mob",
             "area_tag": "test_area",
-            "target": 2,
-            "max_per_room": 2,
+            "target": 3,
+            "max_per_room": 3,
             "respawn_seconds": 0,
         }
         rule.update(overrides)
         return rule
 
-    def test_ms_delete_removes_the_script_row(self):
-        # CMD-10. Unlike ms_stop, nothing survives — the row itself goes.
-        from evennia_mob_spawner.commands import CmdMsDelete
-        from evennia_mob_spawner.script import MobSpawnerScript
+    @staticmethod
+    def _call(cmd_class, args=""):
+        cmd = cmd_class()
+        cmd.caller = mock.Mock()
+        cmd.args = args
+        cmd.func()
+        return cmd.caller
 
-        script = _TickLoopFixture.deploy_rule(self._rule())
-        messages = []
-        CmdMsDelete().apply(script, messages)
+    @staticmethod
+    def _line_for(lines, state):
+        """The ``ms_status`` row naming ``state``'s id."""
+        rows = [line for line in lines if line.split() and line.split()[0] == str(state.pk)]
+        assert len(rows) == 1, f"expected one row for id {state.pk}: {lines}"
+        return rows[0]
 
+    def test_the_installed_commands(self):
+        """CMD-15"""
+        from evennia.commands.default.cmdset_account import AccountCmdSet
+
+        keys = {cmd.key for cmd in AccountCmdSet().commands if cmd.key.startswith("ms_")}
         self.assertEqual(
-            MobSpawnerScript.objects.filter(db_key="test.yaml").count(), 0,
+            keys, {"ms_load", "ms_status", "ms_start", "ms_stop", "ms_delete"},
         )
-        self.assertIn("deleted", " ".join(messages))
+
+    def test_stop_and_start_toggle_the_spawner(self):
+        """CMD-16"""
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.commands import CmdMsStart, CmdMsStop
+
+        self._call(CmdMsStop)
+        self.assertFalse(runtime.is_enabled())
+        self._call(CmdMsStart)
+        self.assertTrue(runtime.is_enabled())
+
+    def test_the_flag_survives_a_restart(self):
+        """CMD-17"""
+        from evennia.server.models import ServerConfig
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.commands import CmdMsStop
+        from evennia_mob_spawner.config import _ENABLED_CONFIG_KEY
+
+        self._call(CmdMsStop)
+        self.assertIs(ServerConfig.objects.conf(_ENABLED_CONFIG_KEY), False)
+
+        # What a boot reads back.
+        runtime.load_rules()
+        self.assertFalse(runtime.is_enabled())
+
+    def test_a_fresh_database_reads_as_enabled(self):
+        """CMD-18"""
+        from evennia_mob_spawner import runtime
+
+        self.assertTrue(runtime.is_enabled())
+
+    def test_status_shows_the_spawner_state(self):
+        """CMD-19"""
+        from evennia_mob_spawner.commands import CmdMsStop, status_lines
+
+        with override_settings(MOB_SPAWNER_TICK_SECONDS=20):
+            header = status_lines()[0]
+            self.assertIn("enabled", header)
+            self.assertIn("N=20", header)
+
+            self._call(CmdMsStop)
+            self.assertIn("disabled", status_lines()[0])
+
+    def test_status_lists_one_row_per_rule(self):
+        """CMD-20"""
+        from evennia_mob_spawner.commands import status_lines
+
+        first, second = _TickLoopFixture.load_rules([
+            self._rule(rule_id=4, key="a grey wolf", area_tag="wolves_ne", target=3),
+            self._rule(rule_id=9, key="a direwolf", area_tag="wolves_ne", target=1),
+        ], path="shard0/southern.yaml")
+
+        lines = status_lines()
+        for state, rule_id, key, target in (
+            (first, "4", "a grey wolf", 3), (second, "9", "a direwolf", 1),
+        ):
+            line = self._line_for(lines, state)
+            for token in ("shard0/southern.yaml", rule_id, key, "wolves_ne", f"0/{target}"):
+                self.assertIn(token, line)
+
+    def test_the_live_count_is_the_ticks_count(self):
+        """CMD-21"""
+        from evennia.utils.create import create_object
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.commands import status_lines
+
+        room = _TickLoopFixture.make_room("Test Room 1")
+        state = _TickLoopFixture.deploy_rule(self._rule())
+        _TickLoopFixture.run(state)
+        # Same typeclass and area, but no rule produced it.
+        interloper = create_object(self.DEFAULT_OBJECT, key="interloper", location=room)
+        interloper.tags.add("test_area", category="mob_area")
+
+        self.assertEqual(runtime.count_living(state), 1)
+        self.assertIn("1/3", self._line_for(status_lines(), state))
+
+    def test_delete_removes_the_rule(self):
+        """CMD-22"""
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.commands import delete_rule
+        from evennia_mob_spawner.models import SpawnRule
+
+        doomed, kept = _TickLoopFixture.load_rules([self._rule(1), self._rule(2)])
+
+        delete_rule(str(doomed.pk))
+
+        self.assertFalse(SpawnRule.objects.filter(pk=doomed.pk).exists())
+        self.assertEqual([s.pk for s in runtime.rule_states()], [kept.pk])
+
+    def test_delete_refuses_an_unknown_id(self):
+        """CMD-23"""
+        from evennia_mob_spawner.commands import delete_rule
+        from evennia_mob_spawner.models import SpawnRule
+
+        state = _TickLoopFixture.deploy_rule(self._rule())
+        unknown = state.pk + 100
+
+        message = delete_rule(str(unknown))
+
+        self.assertIn(str(unknown), message)
+        self.assertEqual(SpawnRule.objects.count(), 1)
+
+    def test_delete_refuses_a_non_integer_id(self):
+        """CMD-24"""
+        from evennia_mob_spawner.commands import delete_rule
+        from evennia_mob_spawner.models import SpawnRule
+
+        _TickLoopFixture.deploy_rule(self._rule())
+
+        message = delete_rule("wolves")
+
+        self.assertIn("wolves", message)
+        self.assertEqual(SpawnRule.objects.count(), 1)
+
+
+class SpawnRuleLookupTest(SpawnerTestCase):
+    """``spawn_rule_for`` — the rule a mob was spawned from."""
+
+    DEFAULT_OBJECT = DEFAULT_OBJECT
+
+    def _rule(self, rule_id=1, **overrides):
+        rule = {
+            "rule_id": rule_id,
+            "typeclass": self.DEFAULT_OBJECT,
+            "key": "a wolf",
+            "area_tag": "test_area",
+            "target": 1,
+            "max_per_room": 1,
+            "respawn_seconds": 0,
+        }
+        rule.update(overrides)
+        return rule
+
+    def setUp(self):
+        super().setUp()
+        self.room = _TickLoopFixture.make_room("Lookup Room")
+
+    def test_a_spawned_mob_returns_its_rule(self):
+        """LOOK-01"""
+        from evennia_mob_spawner import runtime
+
+        rule = self._rule(max_per_room=3)
+        mob = runtime.spawn_one(_TickLoopFixture.deploy_rule(rule), self.room)
+
+        self.assertEqual(runtime.spawn_rule_for(mob), rule)
+
+    def test_a_mob_no_rule_produced_returns_none(self):
+        """LOOK-02"""
+        from evennia.utils.create import create_object
+        from evennia_mob_spawner import runtime
+
+        _TickLoopFixture.deploy_rule(self._rule())
+        stranger = create_object(self.DEFAULT_OBJECT, key="a wolf", location=self.room)
+
+        self.assertIsNone(runtime.spawn_rule_for(stranger))
+
+    def test_a_removed_rule_returns_none(self):
+        """LOOK-03"""
+        from evennia_mob_spawner import runtime
+
+        doomed, _ = _TickLoopFixture.load_rules([self._rule(1), self._rule(2)])
+        mob = runtime.spawn_one(doomed, self.room)
+
+        # The file is reloaded without rule 1; its mob stays in the world.
+        _TickLoopFixture.load_rules([self._rule(2)])
+
+        self.assertIsNone(runtime.spawn_rule_for(mob))
+
+    def test_an_edited_rule_is_seen_at_once(self):
+        """LOOK-04"""
+        from evennia_mob_spawner import runtime
+
+        state = _TickLoopFixture.deploy_rule(self._rule(key="a wolf"))
+        mob = runtime.spawn_one(state, self.room)
+
+        _TickLoopFixture.deploy_rule(self._rule(key="a grey wolf"))
+
+        self.assertEqual(runtime.spawn_rule_for(mob)["key"], "a grey wolf")
+
+    def test_the_mobs_own_file_decides(self):
+        """LOOK-05"""
+        from evennia_mob_spawner import runtime
+
+        _TickLoopFixture.deploy_rule(self._rule(1, key="a wolf"), path="a.yaml")
+        rat_rule = _TickLoopFixture.deploy_rule(self._rule(1, key="a rat"), path="b.yaml")
+        mob = runtime.spawn_one(rat_rule, self.room)
+
+        self.assertEqual(runtime.spawn_rule_for(mob)["key"], "a rat")
+
+    def test_changing_the_result_leaves_the_live_rule_alone(self):
+        """LOOK-06"""
+        from evennia_mob_spawner import runtime
+
+        state = _TickLoopFixture.deploy_rule(self._rule(tags=["vermin"]))
+        mob = runtime.spawn_one(state, self.room)
+
+        result = runtime.spawn_rule_for(mob)
+        result["target"] = 99
+        result["tags"].append("edited")
+
+        live = runtime.rule_states()[0].rule
+        self.assertEqual(live["target"], 1)
+        self.assertEqual(live["tags"], ["vermin"])
+
+
+class ConditionRegistryTest(TestCase):
+    """``register_condition`` — the game's conditions, by name."""
+
+    def setUp(self):
+        patcher = mock.patch.dict(
+            "evennia_mob_spawner.conditions._conditions", {}, clear=True,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_registered_condition_is_found_by_name(self):
+        """COND-01"""
+        from evennia_mob_spawner.conditions import get_condition, register_condition
+
+        def night_only(rule):
+            return True
+
+        register_condition("night_only", night_only)
+        self.assertIs(get_condition("night_only"), night_only)
+
+    def test_a_name_in_use_is_refused_not_replaced(self):
+        """COND-02"""
+        from evennia_mob_spawner.conditions import get_condition, register_condition
+
+        def first(rule):
+            return True
+
+        def second(rule):
+            return False
+
+        register_condition("night_only", first)
+        with self.assertRaises(ValueError):
+            register_condition("night_only", second)
+        self.assertIs(get_condition("night_only"), first)
 

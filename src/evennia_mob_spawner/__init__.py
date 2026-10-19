@@ -21,9 +21,11 @@ from evennia_yaml_reader import (
     ReaderResult,
 )
 
+from .conditions import register_condition
 from .config import get_area_tag_category, get_configured_reader, get_reader_class
 from .definitions import Definitions
 from .errors import DefinitionsError
+from .runtime import spawn_rule_for, start_mob_spawner
 
 __version__ = "0.1.2"
 
@@ -46,4 +48,8 @@ __all__ = [
     # definitions
     "Definitions",
     "DefinitionsError",
+    # runtime
+    "start_mob_spawner",
+    "register_condition",
+    "spawn_rule_for",
 ]

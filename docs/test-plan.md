@@ -25,23 +25,25 @@ All test functions live in `src/evennia_mob_spawner/tests.py`, run via `python r
 | `DIAG` | Tier 4 — deploy-time diagnostics |
 | `GATE` | `should_pre_validate` — the validation gating decision |
 | `SHARD` | Instance gates on the command surface |
-| `STATE` | `MobSpawnerScript`'s persistent state — how it is declared and stored |
-| `DEP` | `Deployer` — upsert, state preservation, purge |
-| `TICK` | The tick loop (`at_repeat` / `_tick_one_rule`) |
-| `PICK` | `_pick_room` — three-tier room selection |
+| `MODEL` | The rule table — where rules and their timers are stored |
+| `DEP` | `ms_load`'s upsert — rows, timers, purge, the in-memory swap |
+| `BOOT` | The `at_server_start` helper — loading rules, registering the tick |
+| `TICK` | The tick — slot selection, the enabled flag, the per-rule pass |
+| `PICK` | Room selection — pack, then the area pool |
+| `COND` | The condition registry |
+| `LOOK` | `spawn_rule_for` — the rule a mob was spawned from |
 | `SPAWN` | `_spawn_one` — tagging, attrs, hook, rollback |
 | `POP` | Population contracts (`_count_living`, `_room_has_space`) |
-| `RACE` | Race protocol — `stop_when_safe` / `force_stop` / drain |
-| `STALL` | The stalled-script state and the commands that name it |
-| `LOAD` | `ms_load`'s stall gate |
-| `CMD` | Command surface — argument parsing, scope resolution, install |
+| `CMD` | Command surface — argument parsing, scope resolution, install, the operating commands |
 | `CLI` | `ms-validate` standalone CLI |
+
+Retired prefixes, IDs not reused: `STATE`, `RACE`, `STALL`, `LOAD`.
 
 ## Fixtures
 
-Most of the suite needs no database. The stages that create Evennia objects (`Deployer`, the tick
-loop, `_spawn_one`) run against a real test database — `runtests.py` calls `evennia._init()`, so
-`create_object` / `create_script` work without a consumer gamedir.
+Most of the suite needs no database. The stages that create Evennia objects (`ms_load`'s upsert, the
+tick, `_spawn_one`) run against a real test database — `runtests.py` calls `evennia._init()`, so
+`create_object` works without a consumer gamedir.
 
 | Fixture | Purpose |
 |---|---|
@@ -54,8 +56,11 @@ loop, `_spawn_one`) run against a real test database — `runtests.py` calls `ev
 | `_FakeTypeclassWithBadHookSignature` | Tier 3 fixture — hook requires an extra argument |
 | `_FakeTypeclassWithDefaultedHookSignature` | Tier 3 fixture — extra params, all defaulted |
 | `_FakeTypeclassWithVariadicHook` | Tier 3 fixture — `*args/**kwargs` hook |
-| `_TickLoopFixture` | Builds tagged rooms, deploys a rule, returns the script. A plain helper rather than a mixin so each test constructs exactly the world it needs |
+| `_TickLoopFixture` | Builds tagged rooms, loads a rule, returns it. A plain helper rather than a mixin so each test constructs exactly the world it needs |
 | `_PersistsCheckFixture` | Plain (non-Evennia) class with and without `AttributeProperty` declarations, for `_persists_as_attribute` |
+| `SpawnerTestCase` | Base for tests that drive the running spawner. Reloads the in-memory table from the clean database before each test, so one test's rules never leak into the next |
+| `_FakeDate` | Carries only `elapsed_real_seconds`, so the tick receiver is driven second by second without a running clock |
+| `_sessioned` | Creates an object in a room reporting one session, for room occupancy |
 
 ## PKG — package and dependencies
 
@@ -64,6 +69,8 @@ loop, `_spawn_one`) run against a real test database — `runtests.py` calls `ev
 | PKG-01 | `__version__` is present and matches the packaged version | `PackageSmokeTest.test_version_present` |
 | PKG-02 | `evennia-yaml-reader`'s primitives import in the library venv | `YamlReaderDependencyTest.test_can_import_reader_primitives` |
 | PKG-03 | `get_area_tag_category` is exported from the package root, so a consumer reading the area tags asks the same accessor the library does | `PackageSmokeTest.test_area_tag_category_accessor_exported` |
+| PKG-04 | `register_condition` and the `at_server_start` helper are exported from the package root | `PackageSmokeTest.test_runtime_entry_points_exported` |
+| PKG-05 | `spawn_rule_for` is exported from the package root | `PackageSmokeTest.test_spawn_rule_lookup_exported` |
 
 ## LOG — `ms_log`
 
@@ -161,6 +168,17 @@ extension writes synchronously rather than going quiet.
 | SHAPE-03 | A string is rejected | `RuleMappingPredicateTest.test_string_rejected` |
 | SHAPE-04 | `None` is rejected | `RuleMappingPredicateTest.test_none_rejected` |
 
+### Rule fields
+
+The fields a rule may carry are the values of `RuleField`. Every predicate takes its field name from
+the enum.
+
+| ID | Case | Test function |
+|---|---|---|
+| SHAPE-79 | A key that is not a rule field is refused, and the finding names it | `RuleFieldPredicateTest.test_an_unknown_key_is_refused` |
+| SHAPE-80 | Several unknown keys in one rule are each named | `RuleFieldPredicateTest.test_every_unknown_key_is_named` |
+| SHAPE-81 | Rules using every field pass, so a field the predicates check cannot be missing from `RuleField` | `RuleFieldPredicateTest.test_rules_using_every_field_pass` |
+
 ### Required fields
 
 | ID | Case | Test function |
@@ -217,10 +235,14 @@ extension writes synchronously rather than going quiet.
 | SHAPE-39 | `desc` absent passes | `OptionalStringPredicatesTest.test_desc_absent_passes` |
 | SHAPE-40 | `desc: ""` is accepted — empty-string-clears-default is permitted | `OptionalStringPredicatesTest.test_desc_empty_string_accepted` |
 | SHAPE-41 | `desc` of the wrong type is rejected | `OptionalStringPredicatesTest.test_desc_wrong_type` |
-| SHAPE-42 | `spawn_with_typeclass` of the wrong type is rejected | `OptionalStringPredicatesTest.test_spawn_with_typeclass_wrong_type` |
-| SHAPE-43 | An empty `spawn_with_typeclass` is rejected | `OptionalStringPredicatesTest.test_spawn_with_typeclass_empty_rejected` |
-| SHAPE-44 | `den_room_tag` of the wrong type is rejected | `OptionalStringPredicatesTest.test_den_room_tag_wrong_type` |
-| SHAPE-45 | An empty `den_room_tag` is rejected | `OptionalStringPredicatesTest.test_den_room_tag_empty_rejected` |
+| SHAPE-73 | `pack` absent passes | `OptionalStringPredicatesTest.test_pack_absent_passes` |
+| SHAPE-74 | `pack` of the wrong type is rejected | `OptionalStringPredicatesTest.test_pack_wrong_type` |
+| SHAPE-75 | An empty `pack` is rejected | `OptionalStringPredicatesTest.test_pack_empty_rejected` |
+| SHAPE-76 | `condition` absent passes | `OptionalStringPredicatesTest.test_condition_absent_passes` |
+| SHAPE-77 | `condition` of the wrong type is rejected | `OptionalStringPredicatesTest.test_condition_wrong_type` |
+| SHAPE-78 | An empty `condition` is rejected | `OptionalStringPredicatesTest.test_condition_empty_rejected` |
+
+Retired IDs, not reused: SHAPE-42..45 (`spawn_with_typeclass`, `den_room_tag`).
 
 ### `attrs`
 
@@ -295,10 +317,6 @@ Runs only with `evennia_runtime=True` — `ms_load`, never the CLI.
 | RESLV-03 | A module that imports but has no such class is flagged | `Tier3ResolvabilityTest.test_typeclass_module_loads_but_class_missing` |
 | RESLV-04 | A `typeclass` that isn't a dotted path is flagged | `Tier3ResolvabilityTest.test_typeclass_not_a_dotted_path_flagged` |
 | RESLV-05 | A path resolving to a non-class is flagged | `Tier3ResolvabilityTest.test_typeclass_resolves_but_is_not_a_class_flagged` |
-| RESLV-06 | A resolvable `spawn_with_typeclass` passes | `Tier3ResolvabilityTest.test_spawn_with_typeclass_resolvable_passes` |
-| RESLV-07 | `spawn_with_typeclass` absent passes | `Tier3ResolvabilityTest.test_spawn_with_typeclass_absent_passes` |
-| RESLV-08 | An unimportable `spawn_with_typeclass` module is flagged | `Tier3ResolvabilityTest.test_spawn_with_typeclass_module_not_importable_flagged` |
-| RESLV-09 | A `spawn_with_typeclass` resolving to a non-class is flagged | `Tier3ResolvabilityTest.test_spawn_with_typeclass_resolves_but_not_a_class_flagged` |
 | RESLV-10 | A callable `ms_at_post_spawn` passes | `Tier3ResolvabilityTest.test_typeclass_with_callable_ms_at_post_spawn_passes` |
 | RESLV-11 | A typeclass without the hook passes — the protocol is opt-in | `Tier3ResolvabilityTest.test_typeclass_without_ms_at_post_spawn_passes` |
 | RESLV-12 | A non-callable `ms_at_post_spawn` is flagged | `Tier3ResolvabilityTest.test_typeclass_with_non_callable_ms_at_post_spawn_flagged` |
@@ -307,6 +325,11 @@ Runs only with `evennia_runtime=True` — `ms_load`, never the CLI.
 | RESLV-15 | Extra params that are all defaulted pass | `Tier3ResolvabilityTest.test_ms_at_post_spawn_defaulted_args_pass` |
 | RESLV-16 | A variadic signature passes | `Tier3ResolvabilityTest.test_ms_at_post_spawn_variadic_signature_passes` |
 | RESLV-17 | Tier 3 does not run with `evennia_runtime=False` | `Tier3ResolvabilityTest.test_tier_3_not_run_when_evennia_runtime_false` |
+| RESLV-18 | A `condition` naming a registered condition passes | `Tier3ResolvabilityTest.test_registered_condition_passes` |
+| RESLV-19 | A `condition` naming no registered condition is flagged, so `ms_load` writes nothing | `Tier3ResolvabilityTest.test_unregistered_condition_flagged` |
+| RESLV-20 | `condition` absent passes | `Tier3ResolvabilityTest.test_condition_absent_passes` |
+
+Retired IDs, not reused: RESLV-06..09 (`spawn_with_typeclass`).
 
 ## DIAG — Tier 4, deploy-time diagnostics
 
@@ -316,10 +339,10 @@ Diagnostics warn; they never refuse.
 |---|---|---|
 | DIAG-01 | An `area_tag` with matching rooms produces no warning | `Tier4DiagnosticTest.test_area_tag_with_rooms_no_warning` |
 | DIAG-02 | An `area_tag` with zero rooms logs a warning and still deploys | `Tier4DiagnosticTest.test_area_tag_with_zero_rooms_logs_warning` |
-| DIAG-03 | `den_room_tag` absent produces no warning | `Tier4DiagnosticTest.test_den_room_tag_absent_no_warning` |
-| DIAG-04 | A `den_room_tag` with zero rooms logs a warning | `Tier4DiagnosticTest.test_den_room_tag_with_zero_rooms_logs_warning` |
 | DIAG-05 | Tier 4 does not run with `evennia_runtime=False` | `Tier4DiagnosticTest.test_tier_4_not_run_when_evennia_runtime_false` |
 | DIAG-06 | Tier 4 is skipped for a rule that failed Tier 1 | `Tier4DiagnosticTest.test_tier_4_skipped_when_rule_failed_tier_1` |
+
+Retired IDs, not reused: DIAG-03, DIAG-04 (`den_room_tag`).
 
 ## GATE — `should_pre_validate`
 
@@ -344,7 +367,8 @@ The level name stays `shard`, matching scaling's own vocabulary (`SCALING_SHARDS
 a consumer's `definitions.yaml` is unchanged.
 
 Retired IDs, not reused: SHARD-02 (`monolith`, a role scaling does not have), SHARD-15..18 and
-SHARD-26 (`check_cluster_wide_scope`, deleted with the census).
+SHARD-26 (`check_cluster_wide_scope`, deleted with the census), SHARD-24 and SHARD-25 (script-scoped
+commands and the census refusal).
 
 ### Detection — `active_shard_id`
 
@@ -391,56 +415,56 @@ The router is refused by role rather than by an id that never matches. Under sca
 | SHARD-22 | `shard` declared but not first is refused | `CheckShardLevelsTest.test_shard_declared_but_not_first_refused` |
 | SHARD-23 | No declared levels is refused | `CheckShardLevelsTest.test_no_levels_declared_refused` |
 
-### Which command carries which gate
+### Refusal wording
 
 | ID | Case | Test function |
 |---|---|---|
-| SHARD-24 | Commands touching the live task are shard-scoped | `CommandScopeGateTest.test_commands_touching_the_live_task_are_shard_scoped` |
-| SHARD-25 | `ms_spawn_report` raises `NotImplementedError` rather than counting | `CommandScopeGateTest.test_the_census_raises_not_implemented` |
 | SHARD-27 | A refusal names the invoking command, not a hard-coded one | `CommandScopeGateTest.test_refusal_names_the_invoking_command` |
 | SHARD-28 | The default command key is `ms_load` | `CommandScopeGateTest.test_default_command_key_is_ms_load` |
 
-## STATE — `MobSpawnerScript`'s persistent state
+## MODEL — the rule table
 
-The five names the script persists — `spawn_table`, `last_spawn_times`, `last_death_times`,
-`last_observed_counts`, `spawned_last_tick` — are declared as `AttributeProperty` descriptors on the
-class rather than initialised in `at_script_creation` and written through `.db`. The declaration is
-what puts the state shape in one visible place, and it is what makes adding validation later a
-one-line change at the declaration instead of a hunt through every write site.
-
-**None of the five validates in `at_set()` today, deliberately.** The library is their sole writer:
-four hold values its own tick loop computes, and `spawn_table` holds rules the Validator has already
-passed pre-flight. Validation goes in if a bad value is ever actually seen, and the declaration is
-what makes that cheap.
-
-**The library writes them by assignment, never through `.db`.** `.db` goes through the
-`AttributeHandler` and never reaches the descriptor, so every `.db` write would become silently
-unvalidated the day an `at_set()` lands. The bypass cannot be closed from the library side — a
-consumer writing through `.db` gets whatever they set — so the rule is ours to keep rather than
-enforce.
-
-Where DEP and TICK cover what the state *means*, these cover how it is stored.
+Rules live in the game's default database: they are a copy of the YAML, and `ms_load` rebuilds them.
 
 | ID | Case | Test function |
 |---|---|---|
-| STATE-01 | A new script starts with the declared defaults — `spawn_table` empty list, the four maps empty dicts — with nothing initialising them in `at_script_creation` | `ScriptStateTest.test_state_01_new_script_starts_with_the_declared_defaults` |
-| STATE-02 | A value assigned through the property persists, read back from a freshly fetched script rather than the in-memory object | `ScriptStateTest.test_state_02_an_assigned_value_persists` |
-| STATE-03 | Two scripts do not share a default — writing one script's `last_spawn_times` leaves another's empty. Written in place, because that is what a shared mutable default leaks through; a wholesale assignment rebinds and would pass either way | `ScriptStateTest.test_state_03_two_scripts_do_not_share_a_default` |
+| MODEL-01 | The rule table is in the default database once migrations have run | `SpawnRuleModelTest.test_the_table_is_in_the_default_database` |
+| MODEL-02 | `(file, rule_id)` is unique — a second row for the same pair is refused by the database | `SpawnRuleModelTest.test_file_and_rule_id_are_unique_together` |
 
-## DEP — Deployer upsert
+## DEP — `ms_load` upsert
+
+`ms_load` validates, upserts one row per rule keyed on `(file, rule_id)`, deletes the rows of rules gone
+from the files it loaded, and swaps the in-memory table the tick reads.
 
 | ID | Case | Test function |
 |---|---|---|
-| DEP-01 | Deploy creates a script when none exists | `DeployerTest.test_deploy_creates_new_script` |
-| DEP-02 | Separate files get separate scripts | `DeployerTest.test_deploy_separate_files_creates_separate_scripts` |
-| DEP-03 | Re-deploy reuses the existing script rather than duplicating it | `DeployerTest.test_redeploy_reuses_existing_script` |
-| DEP-04 | The swap replaces `spawn_table` | `DeployerTest.test_swap_replaces_spawn_table` |
-| DEP-05 | Bookkeeping survives for rules that survive the swap — reloading YAML must not reset a boss cooldown | `DeployerTest.test_state_preserved_for_surviving_rules` |
-| DEP-06 | Bookkeeping is purged for rules removed from YAML | `DeployerTest.test_state_purged_for_removed_rules` |
-| DEP-07 | A new rule starts with no bookkeeping | `DeployerTest.test_new_rule_starts_with_no_bookkeeping` |
-| DEP-08 | An empty `LoadResult` creates no scripts | `DeployerTest.test_empty_load_result_creates_no_scripts` |
+| DEP-05 | Timers survive for rules that survive the load — reloading YAML must not reset a boss cooldown | `DeployerTest.test_state_preserved_for_surviving_rules` |
+| DEP-06 | Rows for rules removed from a loaded file are deleted | `DeployerTest.test_state_purged_for_removed_rules` |
+| DEP-07 | A new rule starts with no timers | `DeployerTest.test_new_rule_starts_with_no_bookkeeping` |
+| DEP-09 | A rule loaded for the first time gets a row | `DeployerTest.test_a_first_load_writes_a_row_per_rule` |
+| DEP-10 | Reloading an edited rule updates its row in place — same primary key, so its tick slot does not move | `DeployerTest.test_an_edited_rule_keeps_its_row` |
+| DEP-11 | Rows belonging to files outside the load's scope are untouched | `DeployerTest.test_rows_outside_the_scope_are_untouched` |
+| DEP-12 | After a load, the next tick runs the new rules, with no restart | `DeployerTest.test_the_next_tick_runs_newly_loaded_rules` |
+| DEP-13 | A load refused by validation writes no row and leaves the in-memory table as it was | `DeployerTest.test_a_refused_load_changes_nothing` |
 
-## TICK — the tick loop
+Retired IDs, not reused: DEP-01..04 and DEP-08 (script creation, reuse and swap).
+
+## BOOT — the `at_server_start` helper
+
+The consumer calls it from `at_server_start()`. Calendar registrations are process state, so it runs on
+every boot and reload.
+
+| ID | Case | Test function |
+|---|---|---|
+| BOOT-01 | The helper loads every row into the in-memory table | `BootTest.test_loads_every_row` |
+| BOOT-02 | The helper registers the tick with the calendar | `BootTest.test_registers_the_tick_with_the_calendar` |
+| BOOT-03 | Calling the helper a second time in one process neither raises nor registers a second tick | `BootTest.test_a_second_call_is_harmless` |
+| BOOT-04 | Timers come back from the rows — a boss killed before a restart does not respawn after it until its `death_cooldown_seconds` has run | `BootTest.test_timers_come_back_from_the_rows` |
+
+## TICK — the tick
+
+The calendar's one-second signal drives the tick. Each second it runs the rules whose primary key falls
+in that second's slot: `pk % N == second % N`, where `N` is `MOB_SPAWNER_TICK_SECONDS`.
 
 | ID | Case | Test function |
 |---|---|---|
@@ -451,32 +475,70 @@ Where DEP and TICK cover what the state *means*, these cover how it is stored.
 | TICK-05 | `death_cooldown_seconds` measures from death, not from spawn | `TickLoopTest.test_death_cooldown_uses_death_time_not_spawn_time` |
 | TICK-06 | No room carrying the `area_tag` skips silently, with a WARN | `TickLoopTest.test_no_room_with_area_tag_skips_silently` |
 | TICK-07 | `max_per_room` is respected | `TickLoopTest.test_max_per_room_respected` |
-| TICK-08 | `den_room_tag` selects the den room | `TickLoopTest.test_den_room_tag_used_when_present` |
 | TICK-09 | `attrs` are applied to the spawned mob | `TickLoopTest.test_attrs_applied_to_spawned_mob` |
 | TICK-10 | A `desc` override is applied | `TickLoopTest.test_desc_override_applied` |
 | TICK-11 | The `area_tag` is stamped on the spawned mob | `TickLoopTest.test_area_tag_stamped_on_spawned_mob` |
 | TICK-12 | Observed counts are updated after a tick | `TickLoopTest.test_observed_counts_updated_after_tick` |
 | TICK-13 | `last_spawn_time` is set after a spawn | `TickLoopTest.test_last_spawn_time_set_after_spawn` |
-| TICK-14 | One bad rule does not break the tick — a co-deployed good rule still spawns | `TickLoopTest.test_bad_rule_does_not_break_tick` |
-| TICK-15 | The script's own spawn last tick is not counted as a death — the `spawned_last_tick` term of the detection formula | `TickLoopTest.test_own_spawn_is_not_counted_as_a_death` |
-| TICK-16 | A first tick against pre-existing mobs produces no death event (decision #11) | `TickLoopTest.test_first_tick_against_pre_existing_mobs_detects_no_death` |
+| TICK-14 | One bad rule does not break the tick — a good rule in the same slot still spawns | `TickLoopTest.test_bad_rule_does_not_break_tick` |
+| TICK-15 | The tick's own spawn last pass is not counted as a death — the `spawned_last_tick` term of the detection formula | `TickLoopTest.test_own_spawn_is_not_counted_as_a_death` |
+| TICK-16 | A first pass against pre-existing mobs produces no death event (decision #11) | `TickLoopTest.test_first_tick_against_pre_existing_mobs_detects_no_death` |
+| TICK-17 | While the spawner is disabled the tick does nothing | `TickLoopTest.test_a_disabled_spawner_does_nothing` |
+| TICK-18 | On a given second only the rules in that second's slot run | `TickLoopTest.test_only_the_seconds_slot_runs` |
+| TICK-19 | Over `N` consecutive seconds every rule runs exactly once | `TickLoopTest.test_every_rule_runs_once_per_cycle` |
+| TICK-20 | A spawn's `last_spawn_time` reaches the rule's row as well as memory | `TickLoopTest.test_a_spawn_time_reaches_the_row` |
+| TICK-21 | An observed death's `last_death_time` reaches the rule's row as well as memory | `TickLoopTest.test_a_death_time_reaches_the_row` |
+| TICK-22 | The tick reads rules from memory — a row edited directly in the database is not seen until the next load or boot | `TickLoopTest.test_rules_are_read_from_memory` |
+| TICK-23 | A rule whose condition answers no does not spawn, and its timers are unchanged | `TickLoopTest.test_a_condition_answering_no_blocks_the_spawn` |
+| TICK-24 | A rule whose condition answers yes spawns as normal | `TickLoopTest.test_a_condition_answering_yes_lets_it_spawn` |
+| TICK-25 | The condition is called with the rule | `TickLoopTest.test_the_condition_is_called_with_the_rule` |
+| TICK-26 | A condition that raises is logged at ERROR and its rule skipped; other rules in the slot still run | `TickLoopTest.test_a_raising_condition_skips_only_its_rule` |
+
+Retired IDs, not reused: TICK-08 (`den_room_tag`).
 
 ## PICK — room selection
 
-Three-tier fallback, decision #22. The den and random steps are reached today through `TICK`; the
-pack step and the fall-through edges are not.
+Pack first, then the area pool. Every step skips a room at `max_per_room` or holding anything with a
+session.
 
 | ID | Case | Test function |
 |---|---|---|
-| PICK-01 | With a living leader in the area, the spawn lands in the leader's room | `PickRoomTest.test_pack_step_returns_the_leaders_room` |
-| PICK-02 | No living leader falls through to the next step | `PickRoomTest.test_no_living_leader_falls_through` |
-| PICK-03 | A leader whose room is at `max_per_room` falls through | `PickRoomTest.test_leader_room_at_max_per_room_falls_through` |
-| PICK-04 | A leader outside the rule's `area_tag` is not chosen | `PickRoomTest.test_leader_outside_the_area_tag_is_not_chosen` |
-| PICK-05 | The den room is chosen when tagged and not full | `TickLoopTest.test_den_room_tag_used_when_present` |
-| PICK-06 | A full den falls through to a random room in the area | `PickRoomTest.test_full_den_falls_through_to_the_area_pool` |
-| PICK-07 | With neither pack nor den, a room from the area pool is chosen | `TickLoopTest.test_tick_spawns_when_below_target` |
+| PICK-07 | With no pack, a room from the area pool is chosen | `TickLoopTest.test_tick_spawns_when_below_target` |
 | PICK-08 | An empty area pool returns no room | `TickLoopTest.test_no_room_with_area_tag_skips_silently` |
 | PICK-09 | Every room at `max_per_room` returns no room | `TickLoopTest.test_max_per_room_respected` |
+| PICK-10 | With a living pack member in the area, the spawn lands in that member's room | `PickRoomTest.test_a_pack_member_draws_the_spawn_to_its_room` |
+| PICK-11 | A member spawned by another rule sharing the pack key counts — the leader need not be alive | `PickRoomTest.test_any_rule_sharing_the_pack_key_counts` |
+| PICK-12 | A pack member outside the rule's `area_tag` is not chosen | `PickRoomTest.test_a_pack_member_outside_the_area_is_not_chosen` |
+| PICK-13 | With no living pack member, a room from the area pool is chosen | `PickRoomTest.test_no_living_member_uses_the_area_pool` |
+| PICK-14 | When every living member's room is full or holds a session, a room from the area pool is chosen | `PickRoomTest.test_a_blocked_member_room_uses_the_area_pool` |
+| PICK-15 | A room holding an object with a session is never chosen | `PickRoomTest.test_a_room_with_a_session_is_never_chosen` |
+| PICK-16 | Objects without a session — mobs, disconnected characters — do not block a room | `PickRoomTest.test_objects_without_a_session_do_not_block` |
+| PICK-17 | When every room in the area holds a session, no room is returned and nothing is logged at WARN | `PickRoomTest.test_every_room_occupied_returns_none_quietly` |
+
+Retired IDs, not reused: PICK-01..06 (`spawn_with_typeclass`, `den_room_tag`).
+
+## COND — the condition registry
+
+The game registers each condition by name at startup; a rule's `condition` names one.
+
+| ID | Case | Test function |
+|---|---|---|
+| COND-01 | A registered condition is returned by name | `ConditionRegistryTest.test_a_registered_condition_is_found_by_name` |
+| COND-02 | Registering a name already in use is refused, never replaced | `ConditionRegistryTest.test_a_name_in_use_is_refused_not_replaced` |
+
+## LOOK — `spawn_rule_for`
+
+Returns a copy of the rule a mob was spawned from, or `None`. Read from the in-memory table by the
+mob's identity tags, so it costs no query against the rule table.
+
+| ID | Case | Test function |
+|---|---|---|
+| LOOK-01 | A mob the spawner produced returns its rule | `SpawnRuleLookupTest.test_a_spawned_mob_returns_its_rule` |
+| LOOK-02 | A mob no rule produced returns `None` | `SpawnRuleLookupTest.test_a_mob_no_rule_produced_returns_none` |
+| LOOK-03 | A mob whose rule has since been removed returns `None` | `SpawnRuleLookupTest.test_a_removed_rule_returns_none` |
+| LOOK-04 | After `ms_load` edits the rule, the lookup returns the edited rule | `SpawnRuleLookupTest.test_an_edited_rule_is_seen_at_once` |
+| LOOK-05 | The same `rule_id` in two files resolves to the mob's own file | `SpawnRuleLookupTest.test_the_mobs_own_file_decides` |
+| LOOK-06 | Changing the returned rule does not change what the tick runs | `SpawnRuleLookupTest.test_changing_the_result_leaves_the_live_rule_alone` |
 
 ## SPAWN — `_spawn_one`
 
@@ -488,6 +550,7 @@ pack step and the fall-through edges are not.
 | SPAWN-02 | The spawned mob carries the source-file tag | `SpawnIdentityTagTest.test_spawned_mob_carries_file_path_tag` |
 | SPAWN-03 | The `area_tag` is retained alongside the identity tags | `SpawnIdentityTagTest.test_spawned_mob_retains_area_tag` |
 | SPAWN-04 | Two rules in one file stamp distinct rule tags | `SpawnIdentityTagTest.test_two_rules_in_same_file_get_distinct_rule_tags` |
+| SPAWN-21 | A rule with `pack` stamps the pack tag on the spawned mob | `SpawnIdentityTagTest.test_a_pack_rule_stamps_the_pack_tag` |
 
 ### YAML-declared tags
 
@@ -519,8 +582,7 @@ pack step and the fall-through edges are not.
 
 ### `ms_at_post_spawn` invocation
 
-Decision #23's runtime half. Tier 3 validates the hook's shape (`RESLV-10`–`RESLV-16`); nothing yet
-exercises the call.
+Decision #23's runtime half. Tier 3 validates the hook's shape (`RESLV-10`–`RESLV-16`).
 
 | ID | Case | Test function |
 |---|---|---|
@@ -538,110 +600,29 @@ exercises the call.
 | POP-04 | `max_per_room` is independent per rule under a shared typeclass and `area_tag` | `RoomHasSpaceContractTest.test_two_rules_share_typeclass_and_area_tag_but_max_per_room_is_independent` |
 | POP-05 | `max_per_room` still blocks within a single rule | `RoomHasSpaceContractTest.test_max_per_room_still_blocks_within_a_single_rule` |
 
-## RACE — race protocol
-
-| ID | Case | Test function |
-|---|---|---|
-| RACE-01 | A tick sets and clears `_tick_in_progress` — the `try/finally` discipline | `RaceProtocolTest.test_tick_sets_and_clears_tick_in_progress` |
-| RACE-02 | A stop requested before the tick exits immediately, writing no state | `RaceProtocolTest.test_tick_exits_early_when_stop_requested_at_start` |
-| RACE-03 | A stop requested mid-loop breaks between rules, not mid-rule | `RaceProtocolTest.test_tick_exits_early_between_rules_when_stop_requested` |
-| RACE-04 | `stop_when_safe` returns True immediately for an idle script | `RaceProtocolTest.test_stop_when_safe_returns_true_for_idle_script` |
-| RACE-05 | `stop_when_safe` is a no-op on an already-paused script | `RaceProtocolTest.test_stop_when_safe_returns_true_for_already_paused_script` |
-| RACE-06 | `stop_when_safe` clears the stop flag on success, so post-resume ticks run | `RaceProtocolTest.test_stop_when_safe_clears_stop_flag_on_success` |
-| RACE-07 | `force_stop` pauses an active script | `RaceProtocolTest.test_force_stop_pauses_active_script` |
-| RACE-08 | `force_stop` sets the stop flag | `RaceProtocolTest.test_force_stop_sets_stop_flag` |
-| RACE-09 | `force_stop` is idempotent on an already-paused script | `RaceProtocolTest.test_force_stop_idempotent_on_already_paused_script` |
-| RACE-10 | The Deployer resumes a script that was running before the swap | `RaceProtocolTest.test_deployer_resumes_running_script_after_swap` |
-| RACE-11 | The Deployer does not resume a script the operator had paused | `RaceProtocolTest.test_deployer_does_not_resume_paused_script` |
-
-## STALL — the stalled state
-
-Decision #26. A script marked active carrying no live tick.
-
-### Detection
-
-| ID | Case | Test function |
-|---|---|---|
-| STALL-01 | Active with no task is stalled | `StalledScriptTest.test_active_without_a_task_is_stalled` |
-| STALL-02 | Active with a task is not stalled | `StalledScriptTest.test_active_with_a_task_is_not_stalled` |
-| STALL-03 | A paused script is not stalled — someone meant it | `StalledScriptTest.test_paused_script_is_not_stalled` |
-| STALL-04 | A stopped script is not stalled | `StalledScriptTest.test_stopped_script_is_not_stalled` |
-
-### `ms_stop`
-
-| ID | Case | Test function |
-|---|---|---|
-| STALL-05 | Reports the stall rather than claiming a pause | `StalledScriptTest.test_ms_stop_reports_the_stall_rather_than_success` |
-| STALL-06 | Leaves a stalled script untouched | `StalledScriptTest.test_ms_stop_leaves_a_stalled_script_untouched` |
-| STALL-07 | Still pauses a genuinely running script | `StalledScriptTest.test_ms_stop_still_pauses_a_running_script` |
-| STALL-08 | Reports a paused script as unchanged | `StalledScriptTest.test_ms_stop_reports_a_paused_script_unchanged` |
-| STALL-09 | Reports a stopped script as unchanged | `StalledScriptTest.test_ms_stop_reports_a_stopped_script_unchanged` |
-
-### `ms_restart`
-
-| ID | Case | Test function |
-|---|---|---|
-| STALL-10 | Recovers a stalled script | `StalledScriptTest.test_ms_restart_recovers_a_stalled_script` |
-| STALL-11 | Names the stall, distinct from an ordinary stop | `StalledScriptTest.test_ms_restart_names_the_stall_apart_from_a_stop` |
-| STALL-12 | Leaves a healthy running script alone | `StalledScriptTest.test_ms_restart_leaves_a_running_script_alone` |
-| STALL-13 | Still unpauses a paused script | `StalledScriptTest.test_ms_restart_still_unpauses_a_paused_script` |
-| STALL-14 | Still starts a stopped script | `StalledScriptTest.test_ms_restart_still_starts_a_stopped_script` |
-| STALL-15 | Reports a start that did not take — a failed recovery is not reported as success | `StalledScriptTest.test_ms_restart_reports_a_start_that_did_not_take` |
-| STALL-16 | Says nothing extra when the tick attaches cleanly | `StalledScriptTest.test_ms_restart_says_nothing_extra_when_the_tick_attaches` |
-| STALL-17 | Reports an unpause that did not take | `StalledScriptTest.test_ms_restart_reports_an_unpause_that_did_not_take` |
-
-### Logging
-
-| ID | Case | Test function |
-|---|---|---|
-| STALL-18 | `ms_stop` logs the stall at WARN | `StalledScriptTest.test_ms_stop_logs_the_stall_at_warn` |
-| STALL-19 | `ms_restart` logs the stall at WARN | `StalledScriptTest.test_ms_restart_logs_the_stall_at_warn` |
-| STALL-20 | A normal stop is not logged at WARN | `StalledScriptTest.test_a_normal_stop_is_not_logged_at_warn` |
-
-### `ms_status`
-
-| ID | Case | Test function |
-|---|---|---|
-| STALL-21 | Names a stalled script — the state word, not an absent `next=`, is the tell | `StalledScriptTest.test_ms_status_names_a_stalled_script` |
-| STALL-22 | Gives a stalled script no `next=` estimate | `StalledScriptTest.test_ms_status_gives_a_stalled_script_no_next_tick` |
-| STALL-23 | Reports a ticking script as active | `StalledScriptTest.test_ms_status_reports_a_ticking_script_as_active` |
-| STALL-24 | Reports a paused script as paused | `StalledScriptTest.test_ms_status_reports_a_paused_script_as_paused` |
-| STALL-25 | Reports a stopped script as stopped | `StalledScriptTest.test_ms_status_reports_a_stopped_script_as_stopped` |
-| STALL-26 | A stalled script reads red | `StalledScriptTest.test_a_stalled_script_reads_red` |
-| STALL-27 | A ticking script reads green | `StalledScriptTest.test_a_ticking_script_reads_green` |
-| STALL-28 | A paused script reads yellow | `StalledScriptTest.test_a_paused_script_reads_yellow` |
-| STALL-29 | Only the state word is coloured, so a list scans | `StalledScriptTest.test_only_the_state_word_is_coloured` |
-
-## LOAD — `ms_load`'s stall gate
-
-| ID | Case | Test function |
-|---|---|---|
-| LOAD-01 | A healthy scope is not refused | `MsLoadStallGateTest.test_a_healthy_scope_is_not_refused` |
-| LOAD-02 | A scope with no scripts yet is not refused | `MsLoadStallGateTest.test_a_scope_with_no_scripts_yet_is_not_refused` |
-| LOAD-03 | A stall outside the scope is not refused | `MsLoadStallGateTest.test_a_stall_outside_the_scope_is_not_refused` |
-| LOAD-04 | A stalled script refuses the load | `MsLoadStallGateTest.test_a_stalled_script_refuses_the_load` |
-| LOAD-05 | Every stalled script is named, so one restart clears them all | `MsLoadStallGateTest.test_every_stalled_script_is_named` |
-| LOAD-06 | One stalled script blocks the whole scope — a partial deploy reported as complete is the failure being guarded against | `MsLoadStallGateTest.test_one_stalled_script_blocks_the_whole_scope` |
-| LOAD-07 | The refusal points at `ms_restart` over the same scope | `MsLoadStallGateTest.test_refusal_points_at_ms_restart_over_the_same_scope` |
-| LOAD-08 | A whole-repo scope refusal points at a whole-repo restart | `MsLoadStallGateTest.test_refusal_on_a_whole_repo_scope_points_at_restart_all` |
-| LOAD-09 | The refusal names `ms_load` as the command to re-run | `MsLoadStallGateTest.test_refusal_names_ms_load_as_the_command_to_re_run` |
-
 ## CMD — command surface
 
-Argument parsing and scope resolution run on every command, so their happy paths are exercised
-end to end through `LOAD` and `STALL`. What is covered here is the refusals — the only thing standing
-between an operator typo and a traceback — and the one command whose `apply` body nothing else
-reaches.
+`ms_load`'s argument parsing and scope resolution are exercised end to end through `DEP`. What is
+covered here is the refusals and the four operating commands. The enabled flag lives in Evennia's
+`ServerConfig`.
 
-Retired IDs, not reused: CMD-11 and CMD-14, the census output. `ms_spawn_report` is gutted and what
-it should become is open; SHARD-25 covers the refusal.
+Retired IDs, not reused: CMD-10, CMD-11 and CMD-14.
 
 | ID | Case | Test function |
 |---|---|---|
 | CMD-04 | No scope token raises `ValueError` | `ParseArgsTest.test_no_scope_token_is_refused` |
 | CMD-05 | A positional token with no `=` raises `ValueError` | `ParseArgsTest.test_a_positional_without_an_equals_is_refused` |
 | CMD-06 | An empty key or value either side of `=` raises `ValueError` | `ParseArgsTest.test_an_empty_key_or_value_is_refused` |
-| CMD-10 | `ms_delete` removes the script row entirely | `OperateCommandBehaviourTest.test_ms_delete_removes_the_script_row` |
+| CMD-15 | The installed commands are exactly `ms_load`, `ms_status`, `ms_start`, `ms_stop` and `ms_delete` | `OperatingCommandTest.test_the_installed_commands` |
+| CMD-16 | `ms_stop` turns the spawner off and `ms_start` turns it back on | `OperatingCommandTest.test_stop_and_start_toggle_the_spawner` |
+| CMD-17 | The enabled flag survives a restart — read back fresh from `ServerConfig` | `OperatingCommandTest.test_the_flag_survives_a_restart` |
+| CMD-18 | A fresh database reads as enabled | `OperatingCommandTest.test_a_fresh_database_reads_as_enabled` |
+| CMD-19 | `ms_status` shows whether the spawner is enabled, and `N` | `OperatingCommandTest.test_status_shows_the_spawner_state` |
+| CMD-20 | `ms_status` lists one row per rule: id, file, `rule_id`, key, `area_tag`, live count and `target` | `OperatingCommandTest.test_status_lists_one_row_per_rule` |
+| CMD-21 | The live count `ms_status` shows is the tick's own population count | `OperatingCommandTest.test_the_live_count_is_the_ticks_count` |
+| CMD-22 | `ms_delete <id>` deletes that rule's row and drops it from the in-memory table | `OperatingCommandTest.test_delete_removes_the_rule` |
+| CMD-23 | `ms_delete` with an id matching no rule is refused, naming the id | `OperatingCommandTest.test_delete_refuses_an_unknown_id` |
+| CMD-24 | `ms_delete` with a non-integer id is refused | `OperatingCommandTest.test_delete_refuses_a_non_integer_id` |
 
 ## CLI — `ms-validate`
 
@@ -653,31 +634,26 @@ The CLI invariant: it never imports Evennia, so it runs where there is no engine
 | CLI-02 | A clean run against an empty repo completes, exiting `0` | `CliScaffoldSmokeTest.test_validate_runs_against_empty_repo` |
 | CLI-04 | Any finding exits `1`, so a CI gate fails the merge | `CliScaffoldSmokeTest.test_a_finding_exits_non_zero` |
 
-## Open decisions
+## Settled and reflected above
 
-- **`at_server_start` helper.** Not yet implemented; no cases allocated. Follows
-  [architecture.md](architecture.md) § Open questions.
-
-Gaps in the ID sequences are retired cases — checks that asserted a constant against itself, or
-re-covered ground `LOAD` / `STALL` already walk end to end. An ID is never reused.
-
-Settled and reflected above:
+Gaps in the ID sequences are retired cases. An ID is never reused.
 
 - **The validator refuses whole, never partially.** Every finding is accumulated and reported
   together (VS-07, VS-12); a rule failing Tier 1 is not carried into Tier 2 or Tier 4 (UNIQ-05,
   DIAG-06).
-- **Diagnostics warn, predicates refuse.** Tier 4 never blocks a deploy (DIAG-02, DIAG-04) — an
-  operator may be deploying world content in parallel.
+- **Diagnostics warn, predicates refuse.** Tier 4 never blocks a deploy (DIAG-02) — an operator may be
+  deploying world content in parallel.
 - **Population identity is `(file, rule_id)`.** Counting and `max_per_room` both key on the identity
   tags, never on typeclass or `area_tag` (POP-01..05).
 - **One bad rule never takes down a tick, and never leaves an orphan.** Per-rule errors are caught
-  and logged (TICK-14); a partial spawn is rolled back and re-raised (SPAWN-13..16).
+  and logged (TICK-14, TICK-26); a partial spawn is rolled back and re-raised (SPAWN-13..16).
 - **The two halves of the death formula stay disjoint.** `last_observed_counts` holds the headcount
-  as observed in step 1; `spawned_last_tick` holds what the tick then added. Step 2 sums them. Folding
+  as observed in step 1; `spawned_last_tick` holds what the pass then added. Step 2 sums them. Folding
   the spawn into both makes the surplus read as a death (TICK-15, and TICK-12 pins the storage).
+- **Timers are the only runtime state that persists.** Observed counts live in memory, and a first
+  pass after boot detects no death (TICK-16); timers come back from the rows (BOOT-04).
 - **A gate that cannot answer refuses rather than guessing.** Instance gates no-op entirely off a
   scaled deployment (SHARD-01, SHARD-05..06, SHARD-19) and refuse without naming an instance they
   cannot verify (SHARD-12).
-- **A failed operation is never reported as success.** The stalled state is named by every command
-  that touches it, and a recovery that did not take is reported as such (STALL-05, STALL-15,
-  STALL-17, LOAD-04).
+- **A refused operation changes nothing.** A load that fails validation writes no row (DEP-13);
+  `ms_delete` refuses an id it cannot match rather than reporting success (CMD-23).
