@@ -152,6 +152,16 @@ The library stamps four categories of tag on each new mob:
 
 The identity tags are *passive identifiers* — the library queries them, the typeclass doesn't read or write them. They are not a callback protocol; the library still observes the world rather than receiving notifications (decision #5).
 
+**Spawn in one area, roam a wider one.** A `tags` entry in the area category gives the mob a second area tag. Spawning still uses only `area_tag`, so a consumer whose wander logic accepts any of the mob's area tags lets it roam both:
+
+```yaml
+area_tag: woods_den                               # spawns only here
+tags:
+  - {key: eastern_woods, category: mob_area}      # also roams here
+```
+
+The mob keeps its `area_tag`, so the spawn area is always part of where it can roam.
+
 ### Death detection (observation, not notification)
 
 The library observes deaths by comparing observed population to expected population per tick (see [The tick loop](#the-tick-loop) step 2). No callback from the typeclass is required or accepted.
