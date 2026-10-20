@@ -139,6 +139,13 @@ class PackageSmokeTest(TestCase):
         self.assertIn("spawn_rule_for", evennia_mob_spawner.__all__)
         self.assertIs(evennia_mob_spawner.spawn_rule_for, runtime.spawn_rule_for)
 
+    def test_spawn_identity_exported(self):
+        """PKG-06"""
+        from evennia_mob_spawner import runtime
+
+        self.assertIn("spawn_identity", evennia_mob_spawner.__all__)
+        self.assertIs(getattr(evennia_mob_spawner, "spawn_identity", None), runtime.spawn_identity)
+
 
 MOB_SPAWNER_LOG = "mob_spawner.log"
 
@@ -3859,6 +3866,63 @@ class SpawnRuleLookupTest(SpawnerTestCase):
         live = runtime.rule_states()[0].rule
         self.assertEqual(live["target"], 1)
         self.assertEqual(live["tags"], ["vermin"])
+
+
+class SpawnIdentityTest(SpawnerTestCase):
+    """``spawn_identity`` — which rule a mob was spawned from, as its file and
+    ``rule_id``. The rule and room are ``SpawnRuleLookupTest``'s."""
+
+    DEFAULT_OBJECT = DEFAULT_OBJECT
+    _rule = SpawnRuleLookupTest._rule
+
+    def setUp(self):
+        super().setUp()
+        self.room = _TickLoopFixture.make_room("Identity Room")
+
+    def test_a_spawned_mob_returns_its_file_and_rule_id(self):
+        """IDENT-01"""
+        from evennia_mob_spawner import runtime
+
+        state = _TickLoopFixture.deploy_rule(self._rule(7, max_per_room=2))
+        first = runtime.spawn_one(state, self.room)
+        second = runtime.spawn_one(state, self.room)
+
+        self.assertEqual(runtime.spawn_identity(first), ("test.yaml", "7"))
+        self.assertEqual(runtime.spawn_identity(second), runtime.spawn_identity(first))
+
+    def test_an_unspawned_or_ambiguous_mob_returns_none(self):
+        """IDENT-02"""
+        from evennia.utils.create import create_object
+        from evennia_mob_spawner import runtime
+        from evennia_mob_spawner.config import _FILE_TAG_CATEGORY
+
+        stranger = create_object(self.DEFAULT_OBJECT, key="a wolf", location=self.room)
+        self.assertIsNone(runtime.spawn_identity(stranger))
+
+        mob = runtime.spawn_one(_TickLoopFixture.deploy_rule(self._rule()), self.room)
+        mob.tags.add("other.yaml", category=_FILE_TAG_CATEGORY)
+        self.assertIsNone(runtime.spawn_identity(mob))
+
+    def test_the_file_tells_rules_apart(self):
+        """IDENT-03"""
+        from evennia_mob_spawner import runtime
+
+        wolf_rule = _TickLoopFixture.deploy_rule(self._rule(1, key="a wolf"), path="a.yaml")
+        rat_rule = _TickLoopFixture.deploy_rule(self._rule(1, key="a rat"), path="b.yaml")
+        wolf = runtime.spawn_one(wolf_rule, self.room)
+        rat = runtime.spawn_one(rat_rule, _TickLoopFixture.make_room("Rat Room"))
+
+        self.assertNotEqual(runtime.spawn_identity(wolf), runtime.spawn_identity(rat))
+
+    def test_a_removed_rule_keeps_its_identity(self):
+        """IDENT-04"""
+        from evennia_mob_spawner import runtime
+
+        doomed, _ = _TickLoopFixture.load_rules([self._rule(1), self._rule(2)])
+        mob = runtime.spawn_one(doomed, self.room)
+        _TickLoopFixture.load_rules([self._rule(2)])
+
+        self.assertEqual(runtime.spawn_identity(mob), ("test.yaml", "1"))
 
 
 class ConditionRegistryTest(TestCase):

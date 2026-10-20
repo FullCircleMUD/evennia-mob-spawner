@@ -154,6 +154,22 @@ def spawn_rule_for(mob) -> dict | None:
     return copy.deepcopy(state.rule) if state is not None else None
 
 
+def spawn_identity(mob) -> tuple | None:
+    """Return ``(file, rule_id)`` for the rule ``mob`` was spawned from, or
+    ``None``.
+
+    Read off the mob's identity tags alone, so two mobs share an identity
+    exactly when one rule produced both — whether or not that rule is still
+    loaded. ``rule_id`` is the tag's string. ``None`` for anything no rule
+    produced, or that carries more than one file or rule tag.
+    """
+    files = mob.tags.get(category=_FILE_TAG_CATEGORY, return_list=True)
+    rule_ids = mob.tags.get(category=_RULE_TAG_CATEGORY, return_list=True)
+    if len(files) != 1 or len(rule_ids) != 1:
+        return None
+    return files[0], rule_ids[0]
+
+
 def is_enabled() -> bool:
     """True if the spawner is enabled."""
     return _enabled

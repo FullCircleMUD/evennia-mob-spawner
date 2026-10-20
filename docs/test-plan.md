@@ -32,6 +32,7 @@ All test functions live in `src/evennia_mob_spawner/tests.py`, run via `python r
 | `PICK` | Room selection — pack, then the area pool |
 | `COND` | The condition registry |
 | `LOOK` | `spawn_rule_for` — the rule a mob was spawned from |
+| `IDENT` | `spawn_identity` — which rule a mob was spawned from, as its file and `rule_id` |
 | `SPAWN` | `_spawn_one` — tagging, attrs, hook, rollback |
 | `POP` | Population contracts (`_count_living`, `_room_has_space`) |
 | `CMD` | Command surface — argument parsing, scope resolution, install, the operating commands |
@@ -71,6 +72,7 @@ tick, `_spawn_one`) run against a real test database — `runtests.py` calls `ev
 | PKG-03 | `get_area_tag_category` is exported from the package root, so a consumer reading the area tags asks the same accessor the library does | `PackageSmokeTest.test_area_tag_category_accessor_exported` |
 | PKG-04 | `register_condition` and the `at_server_start` helper are exported from the package root | `PackageSmokeTest.test_runtime_entry_points_exported` |
 | PKG-05 | `spawn_rule_for` is exported from the package root | `PackageSmokeTest.test_spawn_rule_lookup_exported` |
+| PKG-06 | `spawn_identity` is exported from the package root | `PackageSmokeTest.test_spawn_identity_exported` |
 
 ## LOG — `ms_log`
 
@@ -539,6 +541,18 @@ mob's identity tags, so it costs no query against the rule table.
 | LOOK-04 | After `ms_load` edits the rule, the lookup returns the edited rule | `SpawnRuleLookupTest.test_an_edited_rule_is_seen_at_once` |
 | LOOK-05 | The same `rule_id` in two files resolves to the mob's own file | `SpawnRuleLookupTest.test_the_mobs_own_file_decides` |
 | LOOK-06 | Changing the returned rule does not change what the tick runs | `SpawnRuleLookupTest.test_changing_the_result_leaves_the_live_rule_alone` |
+
+## IDENT — `spawn_identity`
+
+Returns the rule a mob was spawned from as `(file, rule_id)`, or `None` — read off the mob's identity
+tags, so a consumer can tell whether two mobs came from the same rule without reading those tags itself.
+
+| ID | Case | Test function |
+|---|---|---|
+| IDENT-01 | A mob the spawner produced returns `(file, rule_id)`, and two mobs of one rule return the same | `SpawnIdentityTest.test_a_spawned_mob_returns_its_file_and_rule_id` |
+| IDENT-02 | A mob no rule produced returns `None`, and so does one carrying more than one file or rule tag | `SpawnIdentityTest.test_an_unspawned_or_ambiguous_mob_returns_none` |
+| IDENT-03 | One `rule_id` in two files gives two identities | `SpawnIdentityTest.test_the_file_tells_rules_apart` |
+| IDENT-04 | A mob whose rule has since been removed still returns its identity — it is the mob's own tags | `SpawnIdentityTest.test_a_removed_rule_keeps_its_identity` |
 
 ## SPAWN — `_spawn_one`
 
