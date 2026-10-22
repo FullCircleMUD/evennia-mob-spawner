@@ -1995,6 +1995,15 @@ class SpawnRuleModelTest(EvenniaWorldTestCase):
         # The same rule_id in another file is a different rule.
         SpawnRule.objects.create(file="b.yaml", rule_id=1, rule={})
 
+    def test_a_rule_round_trips_unchanged(self):
+        """MODEL-03"""
+        from evennia_mob_spawner.models import SpawnRule
+
+        rule = {"rule_id": 1, "attrs": {"loot": {8: 1, 45: 2}, "pair": (1, 2)}}
+        row = SpawnRule.objects.create(file="a.yaml", rule_id=1, rule=rule)
+
+        self.assertEqual(SpawnRule.objects.get(pk=row.pk).rule, rule)
+
 
 class DeployerTest(SpawnerTestCase):
     """``ms_load``'s upsert: one row per rule, keyed on ``(file, rule_id)``.

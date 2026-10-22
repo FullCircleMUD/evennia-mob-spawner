@@ -432,6 +432,7 @@ Rules live in the game's default database: they are a copy of the YAML, and `ms_
 |---|---|---|
 | MODEL-01 | The rule table is in the default database once migrations have run | `SpawnRuleModelTest.test_the_table_is_in_the_default_database` |
 | MODEL-02 | `(file, rule_id)` is unique — a second row for the same pair is refused by the database | `SpawnRuleModelTest.test_file_and_rule_id_are_unique_together` |
+| MODEL-03 | A rule comes back from the table exactly as it was stored — a dict with integer keys keeps its integer keys, and a tuple stays a tuple. A JSON column would hand back `{"8": 1}` for `{8: 1}`, and a typeclass expecting the integer refuses the string on every spawn | `SpawnRuleModelTest.test_a_rule_round_trips_unchanged` |
 
 ## DEP — `ms_load` upsert
 

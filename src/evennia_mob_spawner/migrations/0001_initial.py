@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: BSD-3-Clause
+import evennia.utils.picklefield
 from django.db import migrations, models
 
 
@@ -23,7 +24,7 @@ class Migration(migrations.Migration):
                 ),
                 ("file", models.CharField(max_length=255)),
                 ("rule_id", models.PositiveIntegerField()),
-                ("rule", models.JSONField()),
+                ("rule", evennia.utils.picklefield.PickledObjectField()),
                 ("last_spawn_time", models.FloatField(blank=True, null=True)),
                 ("last_death_time", models.FloatField(blank=True, null=True)),
             ],

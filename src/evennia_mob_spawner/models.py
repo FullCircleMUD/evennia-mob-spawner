@@ -5,6 +5,7 @@ Rules live in the game's default database. They are a copy of the YAML, and
 ``ms_load`` rebuilds them, so nothing here needs a database of its own.
 """
 from django.db import models
+from evennia.utils.picklefield import PickledObjectField
 
 
 class SpawnRule(models.Model):
@@ -15,11 +16,15 @@ class SpawnRule(models.Model):
     place rather than replacing it.
 
     The two timers are the only runtime state that outlives the process.
+
+    ``rule`` is pickled, not JSON, so it comes back exactly as the loader built
+    it from the YAML. JSON turns an integer dict key into a string and a tuple
+    into a list — see MODEL-03.
     """
 
     file = models.CharField(max_length=255)
     rule_id = models.PositiveIntegerField()
-    rule = models.JSONField()
+    rule = PickledObjectField()
     last_spawn_time = models.FloatField(null=True, blank=True)
     last_death_time = models.FloatField(null=True, blank=True)
 
