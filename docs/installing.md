@@ -10,16 +10,18 @@ them. Work down the steps in order — each one assumes the ones above it.
 pip install evennia-mob-spawner
 ```
 
-Two of its dependencies are **not on PyPI** and install from a checkout:
+Some of its dependencies are **not on PyPI** and install from a checkout:
 
 ```
 pip install -e path/to/evennia-yaml-reader
 pip install -e path/to/evennia-logging-extension
+pip install -e path/to/evennia-db-threads
 ```
 
 `evennia-yaml-reader` is how the library reads YAML — it does no file I/O of its own, which is what
 lets the same pipeline run against a local checkout and a remote repo. `evennia-logging-extension` is
-where its log lines go; see [logging.md](logging.md).
+where its log lines go; see [logging.md](logging.md). `evennia-db-threads` runs the commands' work on
+a worker thread and closes that thread's database connections when the work ends.
 
 ## 2. Add the app
 

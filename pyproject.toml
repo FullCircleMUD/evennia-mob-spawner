@@ -30,6 +30,7 @@ dependencies = [
     "evennia-yaml-reader",
     "evennia-logging-extension",
     "evennia-calendar",
+    "evennia-db-threads",
 ]
 
 [project.optional-dependencies]

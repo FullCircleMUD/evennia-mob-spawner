@@ -618,8 +618,13 @@ Decision #23's runtime half. Tier 3 validates the hook's shape (`RESLV-10`–`RE
 ## CMD — command surface
 
 `ms_load`'s argument parsing and scope resolution are exercised end to end through `DEP`. What is
-covered here is the refusals and the four operating commands. The enabled flag lives in Evennia's
-`ServerConfig`.
+covered here is the refusals, the four operating commands, and the worker-thread dispatch. The enabled
+flag lives in Evennia's `ServerConfig`.
+
+A command's work runs on a worker thread through `evennia-db-threads`' `defer_to_db_thread`, which
+closes that thread's database connections when the work ends. Twisted keeps its worker threads, so a
+connection left open goes dead after a database restart and fails whichever later job lands on that
+thread.
 
 Retired IDs, not reused: CMD-10, CMD-11 and CMD-14.
 
@@ -638,6 +643,8 @@ Retired IDs, not reused: CMD-10, CMD-11 and CMD-14.
 | CMD-22 | `ms_delete <id>` deletes that rule's row and drops it from the in-memory table | `OperatingCommandTest.test_delete_removes_the_rule` |
 | CMD-23 | `ms_delete` with an id matching no rule is refused, naming the id | `OperatingCommandTest.test_delete_refuses_an_unknown_id` |
 | CMD-24 | `ms_delete` with a non-integer id is refused | `OperatingCommandTest.test_delete_refuses_a_non_integer_id` |
+| CMD-25 | `ms_load` dispatches its pipeline through `defer_to_db_thread`, so the worker's connections are released, and the pipeline's messages reach the operator | `DbThreadDispatchTest.test_load_dispatches_through_defer_to_db_thread` |
+| CMD-26 | `ms_status` dispatches its work through `defer_to_db_thread`, so the worker's connections are released, and the status lines reach the operator | `DbThreadDispatchTest.test_status_dispatches_through_defer_to_db_thread` |
 
 ## CLI — `ms-validate`
 

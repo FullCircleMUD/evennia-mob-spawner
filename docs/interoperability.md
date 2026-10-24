@@ -38,6 +38,14 @@ Time-of-day spawn gating is deliberately out of scope — see `CLAUDE.md` § Out
 read through `evennia-yaml-reader`. There is nothing here for the cascade to resolve, so no
 `db_spec.py` and no dependency.
 
+## evennia-db-threads
+
+**Hard dependency.** Imported unconditionally — `defer_to_db_thread` in
+[`commands.py`](../src/evennia_mob_spawner/commands.py), which runs `ms_load`'s pipeline and
+`ms_status`'s population count on a worker thread and closes that thread's database connections when
+the work ends. Off-reactor work here goes through it, not Evennia's `run_async`, which leaves a worker
+thread's connections open to go dead after a database restart.
+
 ## evennia-equipment
 
 **No coupling.** Neither imports the other. A rule's `attrs:` and `tags:` are applied generically to

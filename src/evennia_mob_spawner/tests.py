@@ -3787,6 +3787,55 @@ class OperatingCommandTest(SpawnerTestCase):
         self.assertEqual(SpawnRule.objects.count(), 1)
 
 
+class DbThreadDispatchTest(SpawnerTestCase):
+    """Each command's worker-thread work goes through ``defer_to_db_thread``.
+
+    The stand-in runs the work inline and returns its Deferred, so what the
+    command attaches to that Deferred still decides what the operator sees.
+    """
+
+    @staticmethod
+    def _inline_dispatch():
+        from twisted.internet import defer
+
+        return mock.patch(
+            "evennia_mob_spawner.commands.defer_to_db_thread",
+            side_effect=lambda fn, *args, **kwargs: defer.maybeDeferred(fn, *args, **kwargs),
+        )
+
+    def test_load_dispatches_through_defer_to_db_thread(self):
+        """CMD-25"""
+        from evennia_mob_spawner.commands import CmdMsLoad
+
+        cmd = CmdMsLoad()
+        cmd.caller = mock.Mock()
+        cmd.args = "all"
+        with self._inline_dispatch() as dispatch, mock.patch(
+            "evennia_mob_spawner.commands.get_configured_reader",
+            side_effect=RuntimeError("no reader here"),
+        ):
+            cmd.func()
+
+        dispatch.assert_called_once_with(cmd._run_pipeline, {}, set())
+        sent = [call.args[0] for call in cmd.caller.msg.call_args_list]
+        self.assertTrue(
+            any("could not construct reader" in line for line in sent), sent,
+        )
+
+    def test_status_dispatches_through_defer_to_db_thread(self):
+        """CMD-26"""
+        from evennia_mob_spawner.commands import CmdMsStatus, status_lines
+
+        cmd = CmdMsStatus()
+        cmd.caller = mock.Mock()
+        cmd.args = ""
+        with self._inline_dispatch() as dispatch:
+            cmd.func()
+
+        dispatch.assert_called_once_with(status_lines)
+        cmd.caller.msg.assert_called_once_with("\n".join(status_lines()))
+
+
 class SpawnRuleLookupTest(SpawnerTestCase):
     """``spawn_rule_for`` — the rule a mob was spawned from."""
 

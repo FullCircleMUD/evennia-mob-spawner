@@ -16,10 +16,11 @@ evennia
 sqlean.py; sys_platform == "darwin"
 
 # Siblings this library depends on, editable so an edit in src/ is live in the
-# demo without reinstalling. Neither is on PyPI.
+# demo without reinstalling. None is on PyPI.
 -e ../../evennia-logging-extension
 -e ../../evennia-yaml-reader
 -e ../../evennia-calendar
+-e ../../evennia-db-threads
 
 # The demo wires both content libraries into INSTALLED_APPS to exercise the
 # seam between them in vivo. They are siblings, not stacked — neither imports

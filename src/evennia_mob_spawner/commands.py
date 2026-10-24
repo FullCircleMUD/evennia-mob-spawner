@@ -21,16 +21,17 @@ Shipped:
                   persists across restarts.
 - ``ms_delete`` — remove one rule's row by id. Its live mobs stay.
 """
-# Both unavoidable for a module whose job is in-game commands. An Evennia
+# Unavoidable for a module whose job is in-game commands. An Evennia
 # command is one by inheritance — there is no duck-typed alternative the
 # cmdhandler will accept.
 from evennia.commands.command import Command as BaseCommand
 
-# The deploy pipeline fetches YAML over the network, and doing that on the
-# reactor thread would freeze every connected player for the duration.
-from evennia.utils.utils import run_async
-
 from evennia_yaml_reader import ReaderError
+
+# The deploy pipeline fetches YAML over the network, and doing that on the
+# reactor thread would freeze every connected player for the duration. The
+# worker thread's database connections are closed when each job ends.
+from evennia_db_threads import defer_to_db_thread
 
 from .config import (
     FORCE_VALIDATE_FLAG,
@@ -287,25 +288,23 @@ class CmdMsLoad(BaseCommand):
             return
 
         # Hand the pipeline off to a worker thread. caller.msg() can't
-        # be called from the worker safely; the at_return / at_err
-        # callbacks fire back on the reactor and flush the collected
-        # message list there.
+        # be called from the worker safely; the callback and errback
+        # fire back on the reactor and flush the collected message list
+        # there. Chained, so an error in the callback reaches the errback.
         self.caller.msg(f"ms_load {args} : running async (gameplay continues)…")
-        run_async(
-            self._run_pipeline, query, flags,
-            at_return=self._on_async_return,
-            at_err=self._on_async_err,
-        )
+        defer_to_db_thread(self._run_pipeline, query, flags).addCallback(
+            self._on_async_return
+        ).addErrback(self._on_async_err)
 
     def _run_pipeline(self, query: dict, flags: set) -> tuple[list, bool]:
         """Worker-thread entrypoint: runs the full pipeline.
 
         Returns ``(messages, deployed)``. ``messages`` is every
         operator-facing line; ``deployed`` is True only when rows were
-        written, and tells ``at_return`` whether to swap the in-memory
+        written, and tells ``_on_async_return`` whether to swap the in-memory
         table. Errors with operator-meaningful context (validation refusal,
         deploy failure) get appended as messages and the function returns
-        normally; only unexpected exceptions bubble out for ``at_err``.
+        normally; only unexpected exceptions bubble out for ``_on_async_err``.
         """
         messages: list = []
 
@@ -582,12 +581,11 @@ class CmdMsStatus(BaseCommand):
     help_category = "Mob Spawner"
 
     def func(self):
-        # One population count per rule — off the reactor.
-        run_async(
-            status_lines,
-            at_return=self._on_async_return,
-            at_err=self._on_async_err,
-        )
+        # One population count per rule — off the reactor. Chained, so an
+        # error in the callback reaches the errback.
+        defer_to_db_thread(status_lines).addCallback(
+            self._on_async_return
+        ).addErrback(self._on_async_err)
 
     def _on_async_return(self, lines: list) -> None:
         self.caller.msg("\n".join(lines))
